@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "auditframework"
+version = "0.1.0"
+description = "Framework para auditar automaticamente se respostas de ferramentas de Deep Research sao suportadas pelas referencias que citam."
+requires-python = ">=3.10"
+readme = "README.md"
+
+dependencies = [
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "typer>=0.12",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+# Dependencias de cada estagio do pipeline sao adicionadas incrementalmente
+# nas fases seguintes (indexing/judging), para nao instalar peso (faiss,
+# sentence-transformers, langchain, etc.) antes de a fase existir.
+ingestion = [
+    "requests>=2.31",
+    "cloudscraper>=1.2.71",
+    "playwright>=1.61",
+    "trafilatura>=2.1",
+    "pymupdf4llm>=1.28",
+    "python-docx>=1.2",
+]
+indexing = [
+    "sentence-transformers>=5.6",
+    "faiss-cpu>=1.14",
+    "semantic-text-splitter>=0.32",
+    "tiktoken>=0.13",
+]
+judging = [
+    "openai>=1.50",
+    "anthropic>=0.40",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+]
+
+[project.scripts]
+audit = "auditframework.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
