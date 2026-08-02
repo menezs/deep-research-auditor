@@ -17,7 +17,7 @@ import pytest
 pytest.importorskip("faiss")
 pytest.importorskip("trafilatura")
 
-from auditframework.common.errors import LLMParseError
+from auditframework.common.errors import DeadReferenceError, LLMParseError
 from auditframework.common.llm_client import LLMUsage
 from auditframework.config import Settings
 from auditframework.ingestion.fetcher import FetchResult
@@ -77,7 +77,10 @@ class FakeFetcher:
 
     def fetch(self, url: str) -> FetchResult:
         self.calls[url] = self.calls.get(url, 0) + 1
-        return self.behavior[url]
+        result = self.behavior[url]
+        if isinstance(result, Exception):
+            raise result
+        return result
 
     def fetch_via_playwright(self, url: str) -> FetchResult:
         return self.fetch(url)
@@ -338,3 +341,115 @@ def test_chunk_with_unparseable_judge_output_is_skipped_without_crashing_the_run
     assert len(results) == 1
     verdicts = {json.loads(line)["verdict"] for line in results}
     assert verdicts == {"supported"}
+
+
+def test_chunk_citing_a_dead_reference_is_skipped_not_judged(tmp_path, embedder, llm_client):
+    """Regressao: no modo padrao (escopado por citacao), um chunk cuja
+    unica referencia citada nao pode ser baixada nao deve ser julgado
+    contra evidencia de outra fonte que ele nunca citou — deve ser
+    registrado em `skipped_chunks.jsonl` com justificativa, sem chamar o
+    LLM, e contabilizado no report."""
+    answer_path = tmp_path / "answer.md"
+    answer_path.write_text(_ANSWER_MD, encoding="utf-8")
+    settings, ctx = _make_ctx(tmp_path, answer_path)
+    save_run_meta(ctx)
+
+    fetcher = FakeFetcher(
+        {
+            _LGPD_URL: FetchResult(content=_LGPD_HTML.encode("utf-8"), content_type="text/html", fetch_method="requests", http_status=200),
+            _MARCO_CIVIL_URL: DeadReferenceError("404"),
+        }
+    )
+
+    pipeline = _build_pipeline(settings, fetcher, embedder, llm_client)
+    pipeline.run(ctx)
+
+    assert ctx.stages_completed == ["extraction", "ingestion", "indexing", "judging", "reporting"]
+
+    results = (ctx.run_dir / "audit_results.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(results) == 1
+    assert json.loads(results[0])["verdict"] == "supported"
+    # o juiz fake nao deve ter sido chamado para o chunk cuja referencia morreu
+    assert len(llm_client.calls) == 1
+
+    skipped = (ctx.run_dir / "skipped_chunks.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(skipped) == 1
+    skipped_record = json.loads(skipped[0])
+    assert skipped_record["reason"]  # justificativa nao-vazia, persistida para o report
+
+    report = json.loads((ctx.run_dir / "report.json").read_text(encoding="utf-8"))
+    assert report["count_skipped"] == 1
+    assert report["count_supported"] == 1
+
+    report_md = (ctx.run_dir / "report.md").read_text(encoding="utf-8")
+    assert "SKIPPED" in report_md
+    assert "Chunks Não Auditados" in report_md
+
+
+def test_resume_does_not_reprocess_an_already_skipped_chunk(tmp_path, embedder, llm_client):
+    """Regressao: um chunk ja registrado em `skipped_chunks.jsonl` numa
+    execucao anterior nao deve ser reavaliado (nem gerar um novo registro
+    duplicado, nem tentar chamar o LLM) num `audit resume`."""
+    answer_path = tmp_path / "answer.md"
+    answer_path.write_text(_ANSWER_MD, encoding="utf-8")
+    settings, ctx = _make_ctx(tmp_path, answer_path)
+    save_run_meta(ctx)
+
+    fetcher = FakeFetcher(
+        {
+            _LGPD_URL: FetchResult(content=_LGPD_HTML.encode("utf-8"), content_type="text/html", fetch_method="requests", http_status=200),
+            _MARCO_CIVIL_URL: DeadReferenceError("404"),
+        }
+    )
+
+    pipeline = _build_pipeline(settings, fetcher, embedder, llm_client)
+    pipeline.run(ctx)
+    assert len(llm_client.calls) == 1
+    skipped_before = (ctx.run_dir / "skipped_chunks.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(skipped_before) == 1
+
+    # forca um resume: "esquece" apenas judging/reporting, como um resume real faria
+    ctx.stages_completed = ["extraction", "ingestion", "indexing"]
+    from auditframework.pipeline import _save_stage_state
+
+    _save_stage_state(ctx.run_dir, ctx.stages_completed)
+
+    pipeline.run(ctx)
+
+    skipped_after = (ctx.run_dir / "skipped_chunks.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(skipped_after) == 1  # nao duplicou o registro
+    assert len(llm_client.calls) == 1  # o juiz nao foi chamado de novo
+
+
+def test_full_corpus_mode_never_skips_even_with_a_dead_cited_reference(tmp_path, embedder, llm_client):
+    """No modo `full_corpus_mode`, a citacao e ignorada — mesmo um chunk
+    cuja referencia citada esta morta deve ser julgado, usando o corpus
+    inteiro (que ainda tem a outra referencia baixada) como evidencia."""
+    answer_path = tmp_path / "answer.md"
+    answer_path.write_text(_ANSWER_MD, encoding="utf-8")
+    settings, ctx = _make_ctx(tmp_path, answer_path)
+    ctx.full_corpus_mode = True
+    save_run_meta(ctx)
+
+    fetcher = FakeFetcher(
+        {
+            _LGPD_URL: FetchResult(content=_LGPD_HTML.encode("utf-8"), content_type="text/html", fetch_method="requests", http_status=200),
+            _MARCO_CIVIL_URL: DeadReferenceError("404"),
+        }
+    )
+
+    pipeline = Pipeline(settings)
+    pipeline.add_stage(ExtractionStage())
+    pipeline.add_stage(IngestionStage(fetcher=fetcher))
+    pipeline.add_stage(IndexingStage(embedder))
+    pipeline.add_stage(JudgingStage(llm_client, embedder, reranker=None, top_k=5, rerank_top_k=5, full_corpus_mode=True))
+    pipeline.add_stage(ReportingStage())
+    pipeline.run(ctx)
+
+    skipped_path = ctx.run_dir / "skipped_chunks.jsonl"
+    assert not skipped_path.exists() or skipped_path.read_text(encoding="utf-8").strip() == ""
+    results = (ctx.run_dir / "audit_results.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(results) == 2
+
+    report = json.loads((ctx.run_dir / "report.json").read_text(encoding="utf-8"))
+    assert report["count_skipped"] == 0

@@ -4,6 +4,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
+from .audit_result import SkippedChunk
 from .reference import Reference, ReferenceStatus
 
 
@@ -39,9 +40,11 @@ class Report(BaseModel):
     count_supported: int = 0
     count_unsupported: int = 0
     count_contradicted: int = 0
+    count_skipped: int = 0
 
     dead_references: list[Reference] = Field(default_factory=list)
     inaccessible_references: list[Reference] = Field(default_factory=list)
+    skipped_chunks: list[SkippedChunk] = Field(default_factory=list)
     reference_stats: list[ReferenceStats] = Field(default_factory=list)
 
     total_cost_usd: float = 0.0

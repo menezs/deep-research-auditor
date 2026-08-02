@@ -11,6 +11,7 @@ from ..models import (
     ReferenceStats,
     ReferenceStatus,
     Report,
+    SkippedChunk,
     ToolStats,
 )
 from .cost_tracker import summarize_cost
@@ -28,11 +29,16 @@ _VERDICT_COUNT_FIELDS: dict[AuditVerdict, str] = {
 }
 
 
-def _verdict_percentages(results: list[AuditResult]) -> dict[str, float]:
-    if not results:
+def _verdict_percentages(results: list[AuditResult], total: int | None = None) -> dict[str, float]:
+    """Percentual de cada veredito. `total` e o denominador — por padrao
+    `len(results)` (ex: `ToolStats`, que nao tem nocao de chunks pulados);
+    `aggregate_report` passa `len(chunks)` explicitamente para que
+    SUPPORTED/UNSUPPORTED/CONTRADICTED/SKIPPED somem 100% de fato quando
+    existem chunks pulados (nao julgados)."""
+    total = len(results) if total is None else total
+    if not total:
         return {field_name: 0.0 for field_name in _VERDICT_PCT_FIELDS.values()}
     counts = Counter(r.verdict for r in results)
-    total = len(results)
     return {
         field_name: (counts.get(verdict, 0) / total) * 100.0
         for verdict, field_name in _VERDICT_PCT_FIELDS.items()
@@ -90,6 +96,7 @@ def aggregate_report(
     chunks: list[AnswerChunk],
     references: list[Reference],
     results: list[AuditResult],
+    skipped: list[SkippedChunk] | None = None,
     processing_time_seconds: float = 0.0,
     generated_at: datetime | None = None,
 ) -> Report:
@@ -97,9 +104,10 @@ def aggregate_report(
     em codigo algum nos tres repositorios originais; todo relatorio rico
     (percentual por referencia, referencias mortas, custo total) e escrito
     manualmente a partir do JSON bruto no audit_with_llm."""
-    percentages = _verdict_percentages(results)
+    percentages = _verdict_percentages(results, total=len(chunks))
     counts = _verdict_counts(results)
     cost = summarize_cost(results)
+    skipped = skipped or []
 
     return Report(
         run_id=run_id,
@@ -113,8 +121,10 @@ def aggregate_report(
         count_supported=counts["count_supported"],
         count_unsupported=counts["count_unsupported"],
         count_contradicted=counts["count_contradicted"],
+        count_skipped=len(skipped),
         dead_references=[r for r in references if r.status == ReferenceStatus.DEAD],
         inaccessible_references=[r for r in references if r.status == ReferenceStatus.INACCESSIBLE],
+        skipped_chunks=skipped,
         reference_stats=build_reference_stats(chunks, references, results),
         total_cost_usd=cost.total_cost_usd,
         total_tokens=cost.total_tokens,

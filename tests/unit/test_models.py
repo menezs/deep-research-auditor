@@ -9,6 +9,7 @@ from auditframework.models import (
     ReferenceStatus,
     Report,
     RetrievedPassage,
+    SkippedChunk,
 )
 
 
@@ -52,17 +53,28 @@ def test_answer_chunk_default_references_is_empty_list():
     assert chunk.cited_reference_ids == []
 
 
-def test_curated_document_tracks_degraded_retrieval():
+def test_curated_document_defaults_to_no_skip_reason():
     curated = CuratedDocument(
         answer_chunk_id="c1",
         passages=[
             RetrievedPassage(reference_chunk_id="rc1", reference_id="r1", score=0.8, text="trecho")
         ],
         assembled_context="trecho",
-        retrieval_degraded=True,
     )
-    assert curated.retrieval_degraded is True
+    assert curated.skip_reason is None
     assert curated.passages[0].reference_id == "r1"
+
+
+def test_curated_document_tracks_skip_reason():
+    curated = CuratedDocument(answer_chunk_id="c1", assembled_context="", skip_reason="sem evidencia citada")
+    assert curated.skip_reason == "sem evidencia citada"
+    assert curated.passages == []
+
+
+def test_skipped_chunk_roundtrip():
+    skipped = SkippedChunk(answer_chunk_id="c1", reason="referencia nao baixada")
+    restored = SkippedChunk.model_validate_json(skipped.model_dump_json())
+    assert restored == skipped
 
 
 def test_audit_verdict_has_exactly_three_content_categories():

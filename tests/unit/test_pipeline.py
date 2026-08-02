@@ -145,6 +145,18 @@ def test_build_pipeline_passes_configured_model_names_to_adapters(tmp_path: Path
     assert judging_stage.rerank_top_k == settings.rerank_top_k
 
 
+def test_build_pipeline_defaults_to_citation_scoped_retrieval(tmp_path: Path, monkeypatch):
+    import auditframework.pipeline as pipeline_module
+
+    monkeypatch.setattr(pipeline_module, "BGEEmbedder", _FakeEmbedder)
+    monkeypatch.setattr(pipeline_module, "Reranker", _FakeReranker)
+    monkeypatch.setattr(pipeline_module, "create_llm_client", lambda settings: _FakeLLMClient())
+
+    settings = _settings(tmp_path)
+    assert build_pipeline(settings)._stages[3].full_corpus_mode is False
+    assert build_pipeline(settings, full_corpus_mode=True)._stages[3].full_corpus_mode is True
+
+
 class TestStripReferenceSection:
     def test_removes_heading_and_everything_after_it(self):
         text = "Corpo da resposta [1].\n\n## Referências\n\n[1] Titulo\nhttps://example.com"

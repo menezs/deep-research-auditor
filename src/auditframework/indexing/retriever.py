@@ -16,11 +16,18 @@ class Retriever:
     inteiro, podendo devolver trechos de uma referencia diferente da
     citada pelo AnswerChunk.
 
-    Quando a(s) referencia(s) citada(s) nao tem chunks indexados (porque
-    a Reference esta DEAD/INACCESSIBLE, ou porque a extracao nao
-    resolveu o marcador), a busca degrada para o corpus inteiro e isso e
-    sinalizado explicitamente via `CuratedDocument.retrieval_degraded`,
-    em vez de acontecer silenciosamente como acontece hoje."""
+    Por padrao (`full_corpus_mode=False`), a busca e escopada as
+    referencias citadas pelo chunk. Quando o chunk nao cita nenhuma
+    referencia, ou quando a(s) referencia(s) citada(s) nao tem chunks
+    indexados (porque a Reference esta DEAD/INACCESSIBLE, ou porque a
+    extracao nao resolveu o marcador), o chunk nao pode ser auditado com
+    integridade nesse modo — em vez de degradar silenciosamente para o
+    corpus inteiro, `retrieve` sinaliza isso via `CuratedDocument.skip_reason`
+    para que o chamador pule o julgamento desse chunk.
+
+    Com `full_corpus_mode=True`, a citacao e ignorada e a busca sempre usa
+    o corpus inteiro — reflete o fato de que um Deep Research tipicamente
+    usa todo o conhecimento encontrado, nao so o que citou explicitamente."""
 
     def __init__(
         self,
@@ -29,31 +36,37 @@ class Retriever:
         reranker: Reranker | None = None,
         top_k: int = 50,
         rerank_top_k: int = 20,
+        full_corpus_mode: bool = False,
     ):
         self.embedder = embedder
         self.vector_store = vector_store
         self.reranker = reranker
         self.top_k = top_k
         self.rerank_top_k = rerank_top_k
+        self.full_corpus_mode = full_corpus_mode
 
     def retrieve(self, chunk: AnswerChunk) -> CuratedDocument:
         query_embedding = self.embedder.encode([chunk.text])[0]
 
         allowed_ids = None
-        degraded = False
-        if chunk.cited_reference_ids:
-            allowed_ids = self.vector_store.embedding_ids_for_references(chunk.cited_reference_ids)
-            if not allowed_ids:
-                logger.warning(
-                    "Nenhum chunk indexado para as referencias citadas por %s (%s); "
-                    "degradando para busca no corpus inteiro",
-                    chunk.id,
-                    chunk.cited_reference_ids,
+        skip_reason = None
+        if not self.full_corpus_mode:
+            if not chunk.cited_reference_ids:
+                skip_reason = (
+                    "Chunk nao cita nenhuma referencia; modo de recuperacao atual e escopado por citacao."
                 )
-                allowed_ids = None
-                degraded = True
-        else:
-            degraded = True
+            else:
+                allowed_ids = self.vector_store.embedding_ids_for_references(chunk.cited_reference_ids)
+                if not allowed_ids:
+                    skip_reason = (
+                        f"Referencia(s) citada(s) {chunk.cited_reference_ids} nao possui(em) conteudo "
+                        "indexado (nao baixada(s)/inacessivel(is)) e o modo de recuperacao atual e "
+                        "escopado por citacao."
+                    )
+
+        if skip_reason is not None:
+            logger.warning("Chunk %s nao sera auditado: %s", chunk.id, skip_reason)
+            return CuratedDocument(answer_chunk_id=chunk.id, assembled_context="", skip_reason=skip_reason)
 
         results = self.vector_store.search(query_embedding, self.top_k, allowed_ids=allowed_ids)
 
@@ -70,7 +83,6 @@ class Retriever:
             answer_chunk_id=chunk.id,
             passages=passages,
             assembled_context=_assemble_context(passages),
-            retrieval_degraded=degraded,
         )
 
 

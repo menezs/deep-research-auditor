@@ -56,6 +56,7 @@ class ReportRenderer:
         ]
         if self._results:
             sections.append(self._render_examples())
+        sections.append(self._render_skipped_chunks())
         return "\n\n---\n\n".join(section for section in sections if section)
 
     def to_json(self) -> str:
@@ -79,14 +80,19 @@ class ReportRenderer:
 
     def _render_distribution(self) -> str:
         report = self.report
+        pct_skipped = (report.count_skipped / report.total_chunks * 100.0) if report.total_chunks else 0.0
         rows = [
             ("SUPPORTED", report.count_supported, report.pct_supported),
             ("UNSUPPORTED", report.count_unsupported, report.pct_unsupported),
             ("CONTRADICTED", report.count_contradicted, report.pct_contradicted),
         ]
+        table = "\n".join(f"| **{label}** | {count} | {pct:.1f}% |" for label, count, pct in rows)
         total_chunks = report.count_supported + report.count_unsupported + report.count_contradicted
         total_pct = report.pct_supported + report.pct_unsupported + report.pct_contradicted
-        table = "\n".join(f"| **{label}** | {count} | {pct:.1f}% |" for label, count, pct in rows)
+        if report.count_skipped:
+            table += f"\n| **SKIPPED** | {report.count_skipped} | {pct_skipped:.1f}% |"
+            total_chunks += report.count_skipped
+            total_pct += pct_skipped
         table += f"\n| **TOTAL** | {total_chunks} | {total_pct:.1f}% |"
         return "## 2. Distribuição de Vereditos\n\n| Veredito | Chunks | Percentual |\n|---|---|---|\n" + table
 
@@ -140,6 +146,14 @@ class ReportRenderer:
                 "\n".join(f"- {r.raw_url} — {r.error_message or 'sem detalhes'}" for r in report.inaccessible_references)
             )
         return "\n".join(lines)
+
+    def _render_skipped_chunks(self) -> str:
+        skipped = self.report.skipped_chunks
+        if not skipped:
+            return ""
+        lines = ["## 7. Chunks Não Auditados"]
+        lines.append("\n".join(f"- `{s.answer_chunk_id}` — {s.reason}" for s in skipped))
+        return "\n\n".join(lines)
 
     def _render_examples(self) -> str:
         by_verdict: dict[AuditVerdict, list[AuditResult]] = {v: [] for v in AuditVerdict}

@@ -10,6 +10,7 @@ from auditframework.models import (
     AuditVerdict,
     Reference,
     ReferenceStatus,
+    SkippedChunk,
 )
 from auditframework.reporting import (
     aggregate_report,
@@ -152,6 +153,27 @@ class TestAggregateReport:
         assert report.pct_supported == 0.0
         assert report.total_chunks == 0
 
+    def test_skipped_chunks_are_counted_and_percentages_account_for_them(self):
+        chunks = [_chunk("c1", []), _chunk("c2", []), _chunk("c3", [])]
+        results = [_result("c1", AuditVerdict.SUPPORTED)]
+        skipped = [SkippedChunk(answer_chunk_id="c2", reason="referencia nao baixada")]
+
+        report = aggregate_report(
+            run_id="run-1",
+            answer_id="answer-1",
+            tool_name="ChatGPT",
+            chunks=chunks,
+            references=[],
+            results=results,
+            skipped=skipped,
+        )
+
+        assert report.count_supported == 1
+        assert report.count_skipped == 1
+        assert report.skipped_chunks == skipped
+        assert report.total_chunks == 3
+        assert report.pct_supported == pytest.approx(100 / 3)
+
 
 class TestAggregateToolStats:
     def test_computes_percentages_for_a_single_tool(self):
@@ -242,6 +264,27 @@ class TestRender:
 
         assert "| **Média de tokens por requisição** | 0.0 |" in markdown
         assert "| **Média de custo por requisição** | US$ 0.0000 |" in markdown
+
+    def test_distribution_table_has_no_skipped_row_when_nothing_was_skipped(self):
+        report, chunks, references, results = self._sample_report()
+        markdown = render_markdown(report, chunks=chunks, references=references, results=results)
+        assert "SKIPPED" not in markdown
+        assert "Chunks Não Auditados" not in markdown
+
+    def test_distribution_table_and_section_show_skipped_chunks(self):
+        chunks = [_chunk("c1", ["r1"]), _chunk("c2", [])]
+        results = [_result("c1", AuditVerdict.SUPPORTED)]
+        skipped = [SkippedChunk(answer_chunk_id="c2", reason="chunk nao cita nenhuma referencia")]
+        report = aggregate_report(
+            run_id="run-1", answer_id="answer-1", tool_name="ChatGPT",
+            chunks=chunks, references=[_reference("r1")], results=results, skipped=skipped,
+        )
+        markdown = render_markdown(report, chunks=chunks, results=results)
+
+        assert "| **SKIPPED** | 1 | 50.0% |" in markdown
+        assert "| **TOTAL** | 2 | 100.0% |" in markdown
+        assert "## 7. Chunks Não Auditados" in markdown
+        assert "`c2` — chunk nao cita nenhuma referencia" in markdown
 
     def test_markdown_without_raw_results_skips_examples_section(self):
         report, chunks, references, _results = self._sample_report()

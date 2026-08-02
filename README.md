@@ -114,12 +114,15 @@ src/auditframework/
 
 `Reference` (id estável por hash de URL) → `Document` (conteúdo baixado)
 → `AnswerChunk`/`ReferenceChunk` (chunking) → `CuratedDocument` (contexto
-recuperado e escopado) → `AuditResult` (veredito do juiz — apenas
-`SUPPORTED`/`UNSUPPORTED`/`CONTRADICTED`; uma falha de parsing da saída do
-LLM juiz nunca é coagida silenciosamente para um desses vereditos — o
-chunk é pulado com um aviso e fica pendente para uma próxima
-`audit resume`, sem derrubar o restante do run) → `Report` (agregação
-final). Definições completas em `src/auditframework/models/`.
+recuperado e escopado — ou `skip_reason` setado quando não há evidência
+citada disponível, ver `--full-corpus` acima) → `AuditResult` (veredito do
+juiz — apenas `SUPPORTED`/`UNSUPPORTED`/`CONTRADICTED`; uma falha de
+parsing da saída do LLM juiz nunca é coagida silenciosamente para um
+desses vereditos — o chunk é pulado com um aviso e fica pendente para uma
+próxima `audit resume`, sem derrubar o restante do run) / `SkippedChunk`
+(chunk não julgado por falta de evidência citada, com justificativa) →
+`Report` (agregação final). Definições completas em
+`src/auditframework/models/`.
 
 ## Instalacao (desenvolvimento)
 
@@ -149,7 +152,7 @@ ver `.env.example` para a lista completa e comentada de variáveis.
 ### `audit run` — executa o pipeline completo
 
 ```bash
-audit run RESPOSTA [--tool NOME_DA_FERRAMENTA]
+audit run RESPOSTA [--tool NOME_DA_FERRAMENTA] [--full-corpus]
 ```
 
 - `RESPOSTA` (obrigatório): caminho para o arquivo de resposta a ser
@@ -157,6 +160,22 @@ audit run RESPOSTA [--tool NOME_DA_FERRAMENTA]
 - `--tool` (opcional, padrão `unknown`): nome da ferramenta de Deep
   Research que gerou a resposta (`ChatGPT`, `Gemini`, `Perplexity`, ...)
   — usado como metadado no relatório final, não afeta o processamento.
+- `--full-corpus` (opcional, padrão desligado): controla como o
+  `CuratedDocument` de cada chunk é montado.
+  - **Desligado (padrão)**: a busca é escopada só pelas referências que o
+    chunk efetivamente cita. Se o chunk não cita nenhuma referência, ou a
+    referência citada não pôde ser baixada (morta/inacessível), esse
+    chunk **não é julgado** — fica registrado em `skipped_chunks.jsonl`
+    com uma justificativa, contabilizado no relatório (`SKIPPED`), e o
+    resto da auditoria continua normalmente.
+  - **Ligado**: ignora a citação e monta o contexto buscando no corpus
+    inteiro (reflete que um Deep Research tipicamente usa todo o
+    conhecimento que encontrou, não só o que citou explicitamente) —
+    nesse modo nenhum chunk é pulado por falta de evidência citada.
+
+  A flag é fixada para toda a execução (persistida em
+  `run_meta.json`) — `audit resume` sempre usa o mesmo modo com que a run
+  começou, sem precisar (nem poder) ser passada de novo.
 
 Roda extraction → ingestion → indexing → judging → reporting e persiste
 tudo em `data/runs/<run_id>/` (`run_id` derivado deterministicamente do

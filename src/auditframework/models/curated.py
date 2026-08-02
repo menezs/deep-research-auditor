@@ -19,7 +19,8 @@ class CuratedDocument(BaseModel):
     answer_chunk_id: str
     passages: list[RetrievedPassage] = Field(default_factory=list)
     assembled_context: str
-    retrieval_degraded: bool = False
-    """True quando a(s) referencia(s) citada(s) pelo chunk estavam mortas ou
-    inacessiveis e a recuperacao precisou degradar (ex: buscar no corpus
-    inteiro em vez de escopar pela referencia citada)."""
+    skip_reason: str | None = None
+    """Nao-None quando o chunk nao deve ser submetido ao juiz LLM: no modo
+    de recuperacao escopado por citacao (padrao), a(s) referencia(s)
+    citada(s) pelo chunk nao tem conteudo indexado (nao baixada(s)/
+    inacessivel(is)) ou o chunk nao cita nenhuma referencia."""

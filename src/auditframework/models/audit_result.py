@@ -28,3 +28,13 @@ class AuditResult(BaseModel):
     cost_usd: float = 0.0
     latency_ms: int = 0
     judge_model: str
+
+
+class SkippedChunk(BaseModel):
+    """Chunk que nao foi submetido ao juiz LLM porque nao havia evidencia
+    citada disponivel no modo de recuperacao atual (ver
+    `Retriever.retrieve` / `CuratedDocument.skip_reason`). Nao e um
+    veredito de conteudo — fica de fora de AuditVerdict de proposito."""
+
+    answer_chunk_id: str
+    reason: str

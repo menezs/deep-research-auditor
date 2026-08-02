@@ -25,7 +25,7 @@ from .ingestion.service import Fetcher, ingest_references
 from .ingestion.registry import ReferenceRegistry
 from .judging.judge import Verifier
 from .logging_config import get_logger
-from .models import AnswerChunk, AuditResult, CuratedDocument
+from .models import AnswerChunk, AuditResult, CuratedDocument, SkippedChunk
 from .reporting.aggregator import aggregate_report
 from .reporting.render import render_json, render_markdown
 
@@ -75,6 +75,7 @@ class RunContext:
     settings: Settings
     answer_path: Path
     tool_name: str
+    full_corpus_mode: bool = False
     started_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     stages_completed: list[str] = field(default_factory=list)
 
@@ -89,7 +90,12 @@ def _meta_path(run_dir: Path) -> Path:
 
 def save_run_meta(ctx: RunContext) -> None:
     ctx.run_dir.mkdir(parents=True, exist_ok=True)
-    payload = {"answer_path": str(ctx.answer_path), "tool_name": ctx.tool_name, "started_at": ctx.started_at}
+    payload = {
+        "answer_path": str(ctx.answer_path),
+        "tool_name": ctx.tool_name,
+        "full_corpus_mode": ctx.full_corpus_mode,
+        "started_at": ctx.started_at,
+    }
     _meta_path(ctx.run_dir).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -106,6 +112,7 @@ def load_run_context(run_id: str, settings: Settings) -> RunContext:
         settings=settings,
         answer_path=Path(meta["answer_path"]),
         tool_name=meta["tool_name"],
+        full_corpus_mode=meta.get("full_corpus_mode", False),
         started_at=meta["started_at"],
     )
 
@@ -142,6 +149,12 @@ def load_audit_results(path: Path) -> list[AuditResult]:
     if not path.exists():
         return []
     return [AuditResult.model_validate_json(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def load_skipped_chunks(path: Path) -> list[SkippedChunk]:
+    if not path.exists():
+        return []
+    return [SkippedChunk.model_validate_json(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 class ExtractionStage:
@@ -238,13 +251,17 @@ class JudgingStage:
     de rede por chunk) nunca perca o trabalho de retrieval (fase 1,
     rapido, local) ja feito.
 
-    Resumivel por chunk: `audit_results.jsonl` e append-only, entao um
-    `audit resume` so julga os chunks que ainda nao tem resultado
-    persistido, mesmo que o processo tenha sido interrompido no meio; a
-    fase 1 tambem pula chunks cujo `curated_*.json` ja existe em disco.
-    Um chunk cuja saida do LLM juiz nao pode ser interpretada (JSON
-    invalido/fora do schema) e pulado com um aviso, sem derrubar o resto
-    do run — fica pendente e e retentado numa proxima `audit resume`."""
+    Resumivel por chunk: `audit_results.jsonl` e `skipped_chunks.jsonl` sao
+    append-only, entao um `audit resume` so processa os chunks que ainda
+    nao tem resultado nem registro de skip persistido, mesmo que o
+    processo tenha sido interrompido no meio; a fase 1 tambem pula chunks
+    cujo `curated_*.json` ja existe em disco. Um chunk cuja saida do LLM
+    juiz nao pode ser interpretada (JSON invalido/fora do schema) e pulado
+    com um aviso, sem derrubar o resto do run — fica pendente e e
+    retentado numa proxima `audit resume`. Ja um chunk sem evidencia citada
+    disponivel (`CuratedDocument.skip_reason`) nunca chega a chamar o LLM —
+    e registrado em `skipped_chunks.jsonl` com a justificativa e nao e
+    reprocessado."""
 
     name = "judging"
 
@@ -255,27 +272,39 @@ class JudgingStage:
         reranker: Reranker | None = None,
         top_k: int = 50,
         rerank_top_k: int = 20,
+        full_corpus_mode: bool = False,
     ):
         self.llm_client = llm_client
         self.embedder = embedder
         self.reranker = reranker
         self.top_k = top_k
         self.rerank_top_k = rerank_top_k
+        self.full_corpus_mode = full_corpus_mode
 
     def run(self, ctx: RunContext) -> None:
         chunks = _load_answer_chunks(ctx.run_dir)
         index_dir = ctx.run_dir / "index"
         store = FaissVectorStore.load(self.embedder.dimension, index_dir / "faiss.index", index_dir / "chunks.json")
-        retriever = Retriever(self.embedder, store, self.reranker, self.top_k, self.rerank_top_k)
+        retriever = Retriever(
+            self.embedder, store, self.reranker, self.top_k, self.rerank_top_k, full_corpus_mode=self.full_corpus_mode
+        )
         verifier = Verifier(self.llm_client)
 
         results_path = ctx.run_dir / "audit_results.jsonl"
+        skipped_path = ctx.run_dir / "skipped_chunks.jsonl"
         curated_dir = ctx.run_dir / "curated"
         curated_dir.mkdir(parents=True, exist_ok=True)
         already_judged = {r.answer_chunk_id for r in load_audit_results(results_path)}
+        already_skipped = {s.answer_chunk_id for s in load_skipped_chunks(skipped_path)}
 
-        pending = [c for c in chunks if c.id not in already_judged]
-        logger.info("Julgamento: %d chunks, %d ja julgados, %d pendentes", len(chunks), len(already_judged), len(pending))
+        pending = [c for c in chunks if c.id not in already_judged and c.id not in already_skipped]
+        logger.info(
+            "Julgamento: %d chunks, %d ja julgados, %d ja pulados, %d pendentes",
+            len(chunks),
+            len(already_judged),
+            len(already_skipped),
+            len(pending),
+        )
 
         curated_by_chunk: dict[str, CuratedDocument] = {}
         for chunk in tqdm(pending, desc="Recuperando contexto", unit="chunk"):
@@ -289,10 +318,18 @@ class JudgingStage:
             curated_path.write_text(curated.model_dump_json(indent=2), encoding="utf-8")
             curated_by_chunk[chunk.id] = curated
 
-        with results_path.open("a", encoding="utf-8") as fh:
+        with results_path.open("a", encoding="utf-8") as fh, skipped_path.open("a", encoding="utf-8") as skipped_fh:
             for chunk in tqdm(pending, desc="Julgando chunks", unit="chunk"):
+                curated = curated_by_chunk[chunk.id]
+                if curated.skip_reason is not None:
+                    logger.warning("Chunk %s nao auditado: %s", chunk.id, curated.skip_reason)
+                    skipped_fh.write(
+                        SkippedChunk(answer_chunk_id=chunk.id, reason=curated.skip_reason).model_dump_json() + "\n"
+                    )
+                    skipped_fh.flush()
+                    continue
                 try:
-                    result = verifier.verify(chunk, curated_by_chunk[chunk.id])
+                    result = verifier.verify(chunk, curated)
                 except LLMParseError as exc:
                     logger.warning(
                         "Saida do juiz LLM nao pode ser interpretada para chunk %s — "
@@ -317,6 +354,7 @@ class ReportingStage:
         references = registry.load_references()
         chunks = _load_answer_chunks(ctx.run_dir)
         results = load_audit_results(ctx.run_dir / "audit_results.jsonl")
+        skipped = load_skipped_chunks(ctx.run_dir / "skipped_chunks.jsonl")
 
         started_at = datetime.fromisoformat(ctx.started_at)
         processing_time = (datetime.now(timezone.utc) - started_at).total_seconds()
@@ -328,6 +366,7 @@ class ReportingStage:
             chunks=chunks,
             references=references,
             results=results,
+            skipped=skipped,
             processing_time_seconds=processing_time,
         )
         (ctx.run_dir / "report.md").write_text(
@@ -364,7 +403,7 @@ class Pipeline:
         return ctx
 
 
-def build_pipeline(settings: Settings) -> Pipeline:
+def build_pipeline(settings: Settings, *, full_corpus_mode: bool = False) -> Pipeline:
     """Monta o pipeline real, resolvendo cada dependencia (Embedder,
     Reranker, LLMClient) a partir do `Settings` (Factory pattern) — os
     adapters concretos (`BGEEmbedder`, `Reranker`, `OpenAICompatibleClient`/
@@ -379,6 +418,15 @@ def build_pipeline(settings: Settings) -> Pipeline:
     pipeline.add_stage(ExtractionStage())
     pipeline.add_stage(IngestionStage())
     pipeline.add_stage(IndexingStage(embedder))
-    pipeline.add_stage(JudgingStage(llm_client, embedder, reranker, settings.retrieval_top_k, settings.rerank_top_k))
+    pipeline.add_stage(
+        JudgingStage(
+            llm_client,
+            embedder,
+            reranker,
+            settings.retrieval_top_k,
+            settings.rerank_top_k,
+            full_corpus_mode=full_corpus_mode,
+        )
+    )
     pipeline.add_stage(ReportingStage())
     return pipeline

@@ -56,7 +56,7 @@ def test_retrieval_is_scoped_to_the_cited_reference_even_when_another_reference_
     chunk = AnswerChunk(id="c1", answer_id="a1", position=0, text="pergunta sobre A", cited_reference_ids=["refA"])
     curated = retriever.retrieve(chunk)
 
-    assert curated.retrieval_degraded is False
+    assert curated.skip_reason is None
     assert all(p.reference_id == "refA" for p in curated.passages)
 
 
@@ -69,7 +69,7 @@ def test_unscoped_search_would_have_returned_the_wrong_reference():
     assert results[0][0].reference_id == "refB"
 
 
-def test_no_cited_reference_degrades_to_whole_corpus_search():
+def test_no_cited_reference_is_skipped_in_citation_scoped_mode():
     store = _build_store()
     embedder = FakeEmbedder({"pergunta sem citacao": [1.0, 0.0, 0.0]})
     retriever = Retriever(embedder, store, reranker=None, top_k=5, rerank_top_k=5)
@@ -77,11 +77,11 @@ def test_no_cited_reference_degrades_to_whole_corpus_search():
     chunk = AnswerChunk(id="c1", answer_id="a1", position=0, text="pergunta sem citacao", cited_reference_ids=[])
     curated = retriever.retrieve(chunk)
 
-    assert curated.retrieval_degraded is True
-    assert curated.passages[0].reference_id == "refB"
+    assert curated.skip_reason is not None
+    assert curated.passages == []
 
 
-def test_cited_reference_with_no_indexed_chunks_degrades_with_flag():
+def test_cited_reference_with_no_indexed_chunks_is_skipped_in_citation_scoped_mode():
     store = _build_store()
     embedder = FakeEmbedder({"pergunta sobre C": [1.0, 0.0, 0.0]})
     retriever = Retriever(embedder, store, reranker=None, top_k=5, rerank_top_k=5)
@@ -90,8 +90,33 @@ def test_cited_reference_with_no_indexed_chunks_degrades_with_flag():
     chunk = AnswerChunk(id="c1", answer_id="a1", position=0, text="pergunta sobre C", cited_reference_ids=["refC"])
     curated = retriever.retrieve(chunk)
 
-    assert curated.retrieval_degraded is True
-    assert len(curated.passages) > 0
+    assert curated.skip_reason is not None
+    assert "refC" in curated.skip_reason
+    assert curated.passages == []
+
+
+def test_full_corpus_mode_ignores_citation_scope_and_never_skips():
+    store = _build_store()
+    embedder = FakeEmbedder({"pergunta sem citacao": [1.0, 0.0, 0.0]})
+    retriever = Retriever(embedder, store, reranker=None, top_k=5, rerank_top_k=5, full_corpus_mode=True)
+
+    chunk = AnswerChunk(id="c1", answer_id="a1", position=0, text="pergunta sem citacao", cited_reference_ids=[])
+    curated = retriever.retrieve(chunk)
+
+    assert curated.skip_reason is None
+    assert curated.passages[0].reference_id == "refB"
+
+
+def test_full_corpus_mode_searches_whole_corpus_even_with_a_cited_reference():
+    store = _build_store()
+    embedder = FakeEmbedder({"pergunta sobre A": [0.99, 0.01, 0.0]})
+    retriever = Retriever(embedder, store, reranker=None, top_k=5, rerank_top_k=5, full_corpus_mode=True)
+
+    chunk = AnswerChunk(id="c1", answer_id="a1", position=0, text="pergunta sobre A", cited_reference_ids=["refA"])
+    curated = retriever.retrieve(chunk)
+
+    assert curated.skip_reason is None
+    assert any(p.reference_id == "refB" for p in curated.passages)
 
 
 def test_assembled_context_preserves_provenance_per_passage():

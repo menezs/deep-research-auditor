@@ -34,6 +34,16 @@ def run(
     tool_name: str = typer.Option(
         "unknown", "--tool", help="Nome da ferramenta de Deep Research (ChatGPT/Gemini/Perplexity/...)"
     ),
+    full_corpus: bool = typer.Option(
+        False,
+        "--full-corpus",
+        help=(
+            "Monta o documento curado buscando no corpus inteiro em vez de escopar pelas "
+            "referencias citadas por cada chunk (padrao: escopado por citacao; chunks sem "
+            "evidencia citada disponivel sao pulados, nao julgados). Fica fixada para toda a "
+            "run, inclusive em `audit resume`."
+        ),
+    ),
 ) -> None:
     """Executa o pipeline completo (extraction -> ingestion -> indexing ->
     judging -> reporting) para um unico arquivo de resposta."""
@@ -42,12 +52,16 @@ def run(
     logger = get_logger(__name__)
 
     run_id = make_run_id(answer_file)
-    logger.info("Iniciando run %s para %s (ferramenta=%s)", run_id, answer_file, tool_name)
+    logger.info(
+        "Iniciando run %s para %s (ferramenta=%s, full_corpus=%s)", run_id, answer_file, tool_name, full_corpus
+    )
 
-    ctx = RunContext(run_id=run_id, settings=settings, answer_path=answer_file, tool_name=tool_name)
+    ctx = RunContext(
+        run_id=run_id, settings=settings, answer_path=answer_file, tool_name=tool_name, full_corpus_mode=full_corpus
+    )
     save_run_meta(ctx)
 
-    _run_pipeline(build_pipeline(settings), ctx)
+    _run_pipeline(build_pipeline(settings, full_corpus_mode=ctx.full_corpus_mode), ctx)
 
 
 @app.command()
@@ -65,7 +79,7 @@ def resume(run_id: str = typer.Argument(..., help="Identificador de uma execucao
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
 
-    _run_pipeline(build_pipeline(settings), ctx)
+    _run_pipeline(build_pipeline(settings, full_corpus_mode=ctx.full_corpus_mode), ctx)
 
 
 @app.command()
