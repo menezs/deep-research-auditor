@@ -36,6 +36,9 @@ class Report(BaseModel):
     pct_supported: float
     pct_unsupported: float
     pct_contradicted: float
+    count_supported: int = 0
+    count_unsupported: int = 0
+    count_contradicted: int = 0
 
     dead_references: list[Reference] = Field(default_factory=list)
     inaccessible_references: list[Reference] = Field(default_factory=list)

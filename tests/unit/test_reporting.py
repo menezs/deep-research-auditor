@@ -206,6 +206,43 @@ class TestRender:
         markdown = render_markdown(report, chunks=chunks, references=references, results=results)
         assert "| [[r1]](https://example.com/r1) |" in markdown
 
+    def test_distribution_table_includes_chunk_counts_and_total(self):
+        report, chunks, references, results = self._sample_report()
+        markdown = render_markdown(report, chunks=chunks, references=references, results=results)
+
+        assert "| Veredito | Chunks | Percentual |" in markdown
+        # _sample_report tem 1 SUPPORTED e 1 UNSUPPORTED, 0 CONTRADICTED
+        assert "| **SUPPORTED** | 1 | 50.0% |" in markdown
+        assert "| **UNSUPPORTED** | 1 | 50.0% |" in markdown
+        assert "| **CONTRADICTED** | 0 | 0.0% |" in markdown
+        assert "| **TOTAL** | 2 | 100.0% |" in markdown
+
+    def test_cost_table_includes_averages_per_request(self):
+        chunks = [_chunk("c1", ["r1"]), _chunk("c2", ["r1"])]
+        results = [
+            _result("c1", AuditVerdict.SUPPORTED, cost_usd=0.02, prompt_tokens=100, completion_tokens=20),
+            _result("c2", AuditVerdict.UNSUPPORTED, cost_usd=0.04, prompt_tokens=300, completion_tokens=60),
+        ]
+        report = aggregate_report(
+            run_id="run-1", answer_id="answer-1", tool_name="ChatGPT",
+            chunks=chunks, references=[], results=results,
+        )
+        markdown = render_markdown(report, chunks=chunks, results=results)
+
+        # total: 0.06 USD, 480 tokens, 2 requisicoes -> media 0.03 USD / 240 tokens
+        assert "| **Média de tokens por requisição** | 240.0 |" in markdown
+        assert "| **Média de custo por requisição** | US$ 0.0300 |" in markdown
+
+    def test_cost_table_averages_are_zero_with_no_judged_chunks(self):
+        report = aggregate_report(
+            run_id="run-1", answer_id="answer-1", tool_name="ChatGPT",
+            chunks=[], references=[], results=[],
+        )
+        markdown = render_markdown(report)
+
+        assert "| **Média de tokens por requisição** | 0.0 |" in markdown
+        assert "| **Média de custo por requisição** | US$ 0.0000 |" in markdown
+
     def test_markdown_without_raw_results_skips_examples_section(self):
         report, chunks, references, _results = self._sample_report()
         markdown = render_markdown(report, chunks=chunks, references=references)

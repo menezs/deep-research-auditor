@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from auditframework.extraction.reference_extractor import extract_references
 
 FIXTURE = Path(__file__).parent.parent / "fixtures" / "sample_answer_full.md"
@@ -88,3 +90,231 @@ def test_url_followed_by_real_prose_on_same_line_is_not_merged():
     text = "[1] Titulo\nhttps://example.com/pagina acessado em 10 de outubro de 2025\n"
     refs = extract_references(text, source_answer_id="a1", tool_name="ChatGPT")
     assert refs[0].raw_url == "https://example.com/pagina"
+
+
+def test_html_tag_glued_to_url_is_not_reconnected():
+    """Regressao: um `</u>` colado (sem espaco) logo apos a URL nao pode
+    ser tratado como continuacao de URL quebrada (formato de lista do
+    Perplexity usa `<u>...</u>` ao redor de cada URL) — so tokens que nao
+    comecam com `<` sao continuacao legitima."""
+    text = "[1] Titulo\n<u>https://example.com/pagina</u> resto do paragrafo\n"
+    refs = extract_references(text, source_answer_id="a1", tool_name="ChatGPT")
+    assert refs[0].raw_url == "https://example.com/pagina"
+
+
+class TestAsterismListFormat:
+    """Formato do Perplexity: lista numerada sem colchetes, apos um
+    separador `⁂`, com cada URL entre tags `<u>...</u>` — completamente
+    diferente do `[N] Titulo\\nURL` do ChatGPT/Gemini."""
+
+    def test_document_without_asterism_is_unaffected(self):
+        text = "[1] Titulo\nhttps://example.com/artigo\n"
+        refs = extract_references(text, source_answer_id="a1", tool_name="ChatGPT")
+        assert len(refs) == 1  # so a passada [N] roda; a passada ⁂ e no-op
+
+    def test_simple_entries_are_extracted_with_bracket_style_markers(self):
+        text = "⁂ \n\n1. <u>https://example.com/um</u> \n\n2. <u>https://example.com/dois</u> \n"
+        refs = extract_references(text, source_answer_id="a1", tool_name="Perplexity")
+        by_url = {r.raw_url: r for r in refs}
+        assert set(by_url) == {"https://example.com/um", "https://example.com/dois"}
+        # o numero da lista vira marcador [N] no formato canonico, para o
+        # resto do pipeline (AnswerChunker) resolver citacoes inline iguais
+        assert by_url["https://example.com/dois"].citation_markers == ["[2]"]
+
+    def test_multiple_entries_on_the_same_physical_line(self):
+        text = "⁂ \n\n2. <u>https://example.com/a</u> 3. <u>https://example.com/b</u> \n"
+        refs = extract_references(text, source_answer_id="a1", tool_name="Perplexity")
+        by_marker = {r.citation_markers[0]: r.raw_url for r in refs}
+        assert by_marker == {"[2]": "https://example.com/a", "[3]": "https://example.com/b"}
+
+    def test_url_wrapped_across_multiple_lines_with_blank_line_between(self):
+        text = (
+            "⁂ \n\n"
+            "7. <u>https://example.com/quebrado-intervencao-e-</u> \n\n"
+            "<u>continuacao-2024/</u> \n"
+        )
+        refs = extract_references(text, source_answer_id="a1", tool_name="Perplexity")
+        assert refs[0].raw_url == "https://example.com/quebrado-intervencao-e-continuacao-2024/"
+
+    def test_continuation_line_tolerates_markdown_noise_prefix(self):
+        """Ruido de markdown (### ou - antes do numero/continuacao),
+        artefato comum da conversao PDF->Markdown do pymupdf4llm."""
+        text = (
+            "⁂ \n\n"
+            "### 8. <u>https://example.com/com-hash</u> \n\n"
+            "9. <u>https://example.com/nove-a</u> \n\n"
+            "- <u>nove-b</u> \n"
+        )
+        refs = extract_references(text, source_answer_id="a1", tool_name="Perplexity")
+        by_marker = {r.citation_markers[0]: r.raw_url for r in refs}
+        assert by_marker["[8]"] == "https://example.com/com-hash"
+        assert by_marker["[9]"] == "https://example.com/nove-anove-b"
+
+    def test_literal_space_inside_a_single_tag_becomes_percent_20(self):
+        text = "⁂ \n\n10. <u>https://example.com/bitstream/Arquivo Com Espaco.pdf</u> \n"
+        refs = extract_references(text, source_answer_id="a1", tool_name="Perplexity")
+        assert refs[0].raw_url == "https://example.com/bitstream/Arquivo%20Com%20Espaco.pdf"
+
+    def test_prose_numbered_list_before_asterism_is_not_treated_as_references(self):
+        """A passada ⁂ so opera no texto APOS o separador — uma lista
+        numerada comum no corpo/resumo antes do ⁂ (ex: "1. Titulo A [24]")
+        nao deve virar uma entrada de referencia."""
+        text = (
+            "## Referências\n"
+            "1. **Fonte A** - resumo qualquer<sup><u>[24][4]</u></sup>\n"
+            "2. **Fonte B** - outro resumo<sup><u>[5]</u></sup>\n\n"
+            "⁂ \n\n"
+            "1. <u>https://example.com/real</u> \n"
+        )
+        refs = extract_references(text, source_answer_id="a1", tool_name="Perplexity")
+        assert len(refs) == 1
+        assert refs[0].raw_url == "https://example.com/real"
+
+    def test_bracket_and_asterism_formats_can_coexist_in_the_same_document(self):
+        text = (
+            "[1] Referencia estilo ChatGPT\nhttps://example.com/chatgpt\n\n"
+            "⁂ \n\n"
+            "1. <u>https://example.com/perplexity</u> \n"
+        )
+        refs = extract_references(text, source_answer_id="a1", tool_name="Perplexity")
+        urls = {r.raw_url for r in refs}
+        assert urls == {"https://example.com/chatgpt", "https://example.com/perplexity"}
+
+
+class TestAsterismBareUrlFormat:
+    """Formato do Perplexity em .docx: lista pos-`⁂` sem NENHUMA
+    numeracao/marcacao — so uma URL por linha, em texto puro (sem tags
+    `<u>`, ja que `python-docx` nao produz HTML). O marcador `[N]` e
+    inferido pela ordem de ocorrencia."""
+
+    def test_bare_urls_get_positional_markers(self):
+        text = "⁂\n\nhttps://example.com/um\n\nhttps://example.com/dois\n\nhttps://example.com/tres\n"
+        refs = extract_references(text, source_answer_id="a1", tool_name="Perplexity")
+        by_marker = {r.citation_markers[0]: r.raw_url for r in refs}
+        assert by_marker == {
+            "[1]": "https://example.com/um",
+            "[2]": "https://example.com/dois",
+            "[3]": "https://example.com/tres",
+        }
+
+    def test_numbered_format_takes_priority_over_bare_fallback(self):
+        """Se a lista pos-⁂ tiver numeracao (`N.`), o fallback de URL nua
+        nunca deve rodar — evita reprocessar/duplicar as mesmas entradas."""
+        text = "⁂\n\n1. <u>https://example.com/numerado</u>\n"
+        refs = extract_references(text, source_answer_id="a1", tool_name="Perplexity")
+        assert len(refs) == 1
+        assert refs[0].raw_url == "https://example.com/numerado"
+
+    def test_literal_space_in_filename_url_is_preserved_as_percent20(self):
+        """Regressao: diferente do `_extract_url` generico (que so
+        reconecta um unico token sem espaco, por poder haver prosa real
+        depois da URL), aqui a linha inteira e sempre so a URL -- um nome
+        de arquivo com espaco (ex: "Relatorio Final.pdf") nao pode ser
+        truncado no primeiro espaco."""
+        text = "⁂\n\nhttps://example.com/arquivos/Relatorio Final Completo.pdf\n"
+        refs = extract_references(text, source_answer_id="a1", tool_name="Perplexity")
+        assert refs[0].raw_url == "https://example.com/arquivos/Relatorio%20Final%20Completo.pdf"
+
+    def test_document_without_asterism_is_unaffected(self):
+        text = "[1] Titulo\nhttps://example.com/artigo\n"
+        refs = extract_references(text, source_answer_id="a1", tool_name="ChatGPT")
+        assert len(refs) == 1
+
+    def test_blank_lines_between_entries_are_skipped(self):
+        text = "⁂\n\n\n\nhttps://example.com/um\n\n\n\nhttps://example.com/dois\n"
+        refs = extract_references(text, source_answer_id="a1", tool_name="Perplexity")
+        assert len(refs) == 2
+
+
+class TestRepairUsingPdfLinks:
+    """`pymupdf4llm` (conversao PDF->texto) as vezes descarta um hifen num
+    ponto de quebra de linha sem deixar nenhum sinal textual disso (ex:
+    "de marco" -> "demarco"), o que nenhuma heuristica de texto consegue
+    recuperar. Quando `answer_path` aponta pra um PDF, `extract_references`
+    corrige a URL usando os hyperlinks reais embutidos nele."""
+
+    def _make_pdf(self, path: Path, links: list[str]) -> None:
+        fitz = __import__("fitz")
+        doc = fitz.open()
+        page = doc.new_page()
+        for i, uri in enumerate(links):
+            rect = fitz.Rect(50, 50 + i * 20, 300, 65 + i * 20)
+            page.insert_text((50, 60 + i * 20), f"link {i}")
+            page.insert_link({"kind": fitz.LINK_URI, "from": rect, "uri": uri})
+        doc.save(str(path))
+        doc.close()
+
+    def test_dropped_hyphen_is_restored_from_embedded_pdf_link(self, tmp_path):
+        pytest.importorskip("fitz")
+        pdf_path = tmp_path / "resposta.pdf"
+        self._make_pdf(pdf_path, ["https://example.com/17-de-marco-de-2026"])
+
+        text = "[1] Titulo\nhttps://example.com/17-demarco-de-2026\n"
+        refs = extract_references(text, source_answer_id="a1", tool_name="ChatGPT", answer_path=pdf_path)
+
+        assert refs[0].raw_url == "https://example.com/17-de-marco-de-2026"
+
+    def test_ambiguous_percent20_is_resolved_by_embedded_pdf_link(self, tmp_path):
+        pytest.importorskip("fitz")
+        pdf_path = tmp_path / "resposta.pdf"
+        self._make_pdf(pdf_path, ["https://example.com/doen%C3%A7a-de-alzheimer"])
+
+        text = "[1] Titulo\nhttps://example.com/doen%20ça-de-alzheimer\n"
+        refs = extract_references(text, source_answer_id="a1", tool_name="Perplexity", answer_path=pdf_path)
+
+        assert refs[0].raw_url == "https://example.com/doen%C3%A7a-de-alzheimer"
+
+    def test_truncated_lookalike_link_is_not_picked_by_mistake(self, tmp_path):
+        """Um PDF pode ter mais de um hyperlink parecido (ex: um vindo de
+        uma tabela markdown corrompida) — o reparo so deve trocar a URL
+        quando a chave difusa bate EXATAMENTE, nunca por parecenca parcial."""
+        pytest.importorskip("fitz")
+        pdf_path = tmp_path / "resposta.pdf"
+        self._make_pdf(
+            pdf_path,
+            ["https://example.com/cancer-de-pancreas", "https://example.com/cancer-de-p%25..."],
+        )
+
+        text = "[1] Titulo\nhttps://example.com/cancer-de-pancreas\n"
+        refs = extract_references(text, source_answer_id="a1", tool_name="Perplexity", answer_path=pdf_path)
+
+        assert refs[0].raw_url == "https://example.com/cancer-de-pancreas"
+
+    def test_pdf_without_matching_link_leaves_url_unchanged(self, tmp_path):
+        pytest.importorskip("fitz")
+        pdf_path = tmp_path / "resposta.pdf"
+        self._make_pdf(pdf_path, ["https://example.com/outra-referencia-qualquer"])
+
+        text = "[1] Titulo\nhttps://example.com/pagina-normal\n"
+        refs = extract_references(text, source_answer_id="a1", tool_name="ChatGPT", answer_path=pdf_path)
+
+        assert refs[0].raw_url == "https://example.com/pagina-normal"
+
+    def test_non_pdf_answer_path_is_ignored(self, tmp_path):
+        md_path = tmp_path / "resposta.md"
+        md_path.write_text("qualquer coisa", encoding="utf-8")
+
+        text = "[1] Titulo\nhttps://example.com/pagina\n"
+        refs = extract_references(text, source_answer_id="a1", tool_name="ChatGPT", answer_path=md_path)
+
+        assert refs[0].raw_url == "https://example.com/pagina"
+
+    def test_two_repaired_references_colliding_into_the_same_id_are_merged(self, tmp_path):
+        pytest.importorskip("fitz")
+        pdf_path = tmp_path / "resposta.pdf"
+        self._make_pdf(pdf_path, ["https://example.com/mesma-pagina"])
+
+        # duas entradas de texto corrompidas de formas diferentes, mas que
+        # o hyperlink do pdf resolve para a MESMA url real
+        text = (
+            "[1] Titulo A\nhttps://example.com/mesma-pa%20gina\n\n"
+            "[2] Titulo B\nhttps://example.com/mesma-paginaX\n"
+        )
+        refs = extract_references(text, source_answer_id="a1", tool_name="ChatGPT", answer_path=pdf_path)
+
+        # a segunda ("...paginaX") nao bate na chave difusa com o link do
+        # pdf, entao so a primeira e reparada -- confirma que so ha 1
+        # merge por chave exata, nao um colapso indevido de referencias
+        # genuinamente diferentes
+        urls = sorted(r.raw_url for r in refs)
+        assert urls == ["https://example.com/mesma-pagina", "https://example.com/mesma-paginaX"]

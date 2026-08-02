@@ -80,18 +80,26 @@ class ReportRenderer:
     def _render_distribution(self) -> str:
         report = self.report
         rows = [
-            ("SUPPORTED", report.pct_supported),
-            ("UNSUPPORTED", report.pct_unsupported),
-            ("CONTRADICTED", report.pct_contradicted),
+            ("SUPPORTED", report.count_supported, report.pct_supported),
+            ("UNSUPPORTED", report.count_unsupported, report.pct_unsupported),
+            ("CONTRADICTED", report.count_contradicted, report.pct_contradicted),
         ]
-        table = "\n".join(f"| **{label}** | {pct:.1f}% |" for label, pct in rows)
-        return "## 2. Distribuição de Vereditos\n\n| Veredito | Percentual |\n|---|---|\n" + table
+        total_chunks = report.count_supported + report.count_unsupported + report.count_contradicted
+        total_pct = report.pct_supported + report.pct_unsupported + report.pct_contradicted
+        table = "\n".join(f"| **{label}** | {count} | {pct:.1f}% |" for label, count, pct in rows)
+        table += f"\n| **TOTAL** | {total_chunks} | {total_pct:.1f}% |"
+        return "## 2. Distribuição de Vereditos\n\n| Veredito | Chunks | Percentual |\n|---|---|---|\n" + table
 
     def _render_cost(self) -> str:
         report = self.report
+        total_requests = report.count_supported + report.count_unsupported + report.count_contradicted
+        avg_tokens = report.total_tokens / total_requests if total_requests else 0.0
+        avg_cost = report.total_cost_usd / total_requests if total_requests else 0.0
         rows = [
             ("Custo total estimado", f"US$ {report.total_cost_usd:.4f}"),
             ("Total de tokens", str(report.total_tokens)),
+            ("Média de tokens por requisição", f"{avg_tokens:.1f}"),
+            ("Média de custo por requisição", f"US$ {avg_cost:.4f}"),
         ]
         table = "\n".join(f"| **{label}** | {value} |" for label, value in rows)
         return "## 3. Custo e Uso de Tokens\n\n| Métrica | Valor |\n|---|---|\n" + table

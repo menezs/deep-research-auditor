@@ -167,7 +167,11 @@ class ExtractionStage:
         shutil.copy2(ctx.answer_path, input_dir / f"original{ctx.answer_path.suffix}")
 
         references = extract_references(
-            text, source_answer_id=ctx.run_id, tool_name=ctx.tool_name, strategy=self.extractor
+            text,
+            source_answer_id=ctx.run_id,
+            tool_name=ctx.tool_name,
+            strategy=self.extractor,
+            answer_path=ctx.answer_path,
         )
         ReferenceRegistry(ctx.run_dir).save_references(references)
         logger.info("Extraidas %d referencias de %s", len(references), ctx.answer_path)

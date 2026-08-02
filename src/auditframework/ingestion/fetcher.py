@@ -47,6 +47,19 @@ class HttpFetcher:
 
     def fetch(self, url: str) -> FetchResult:
         try:
+            return self._fetch_once(url)
+        except DeadReferenceError:
+            if "%20" not in url:
+                raise
+            for variant in self._url_variations(url):
+                try:
+                    return self._fetch_once(variant)
+                except (DeadReferenceError, InaccessibleReferenceError):
+                    continue
+            raise
+
+    def _fetch_once(self, url: str) -> FetchResult:
+        try:
             return self._get(url, verify=True)
         except requests.exceptions.SSLError:
             try:
@@ -55,6 +68,20 @@ class HttpFetcher:
                 return self._fetch_with_cloudscraper(url)
         except _Http403Error:
             return self._fetch_with_cloudscraper(url)
+
+    @staticmethod
+    def _url_variations(url: str) -> list[str]:
+        """Duas variantes de reparo para uma URL reconstruida com `%20` no
+        lugar de um ponto de quebra de linha ambiguo do PDF original (a
+        extracao de referencias sempre normaliza espaco literal para
+        `%20`, nunca deixa espaco bruto na URL armazenada) — o `%20`
+        poderia representar um separador `-`, ou nenhum separador nenhum.
+        Mesma tecnica usada pelo CorpusForge
+        (`FileConverter._try_url_variations`), aqui reaproveitando toda a
+        cadeia de fallback existente (`requests -> cloudscraper ->
+        playwright`) para cada variante, em vez de uma sondagem HEAD
+        separada."""
+        return [url.replace("%20", "-"), url.replace("%20", "")]
 
     def fetch_via_playwright(self, url: str) -> FetchResult:
         try:

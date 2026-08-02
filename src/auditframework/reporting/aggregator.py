@@ -21,6 +21,12 @@ _VERDICT_PCT_FIELDS: dict[AuditVerdict, str] = {
     AuditVerdict.CONTRADICTED: "pct_contradicted",
 }
 
+_VERDICT_COUNT_FIELDS: dict[AuditVerdict, str] = {
+    AuditVerdict.SUPPORTED: "count_supported",
+    AuditVerdict.UNSUPPORTED: "count_unsupported",
+    AuditVerdict.CONTRADICTED: "count_contradicted",
+}
+
 
 def _verdict_percentages(results: list[AuditResult]) -> dict[str, float]:
     if not results:
@@ -31,6 +37,11 @@ def _verdict_percentages(results: list[AuditResult]) -> dict[str, float]:
         field_name: (counts.get(verdict, 0) / total) * 100.0
         for verdict, field_name in _VERDICT_PCT_FIELDS.items()
     }
+
+
+def _verdict_counts(results: list[AuditResult]) -> dict[str, int]:
+    counts = Counter(r.verdict for r in results)
+    return {field_name: counts.get(verdict, 0) for verdict, field_name in _VERDICT_COUNT_FIELDS.items()}
 
 
 def build_reference_stats(
@@ -87,6 +98,7 @@ def aggregate_report(
     (percentual por referencia, referencias mortas, custo total) e escrito
     manualmente a partir do JSON bruto no audit_with_llm."""
     percentages = _verdict_percentages(results)
+    counts = _verdict_counts(results)
     cost = summarize_cost(results)
 
     return Report(
@@ -98,6 +110,9 @@ def aggregate_report(
         pct_supported=percentages["pct_supported"],
         pct_unsupported=percentages["pct_unsupported"],
         pct_contradicted=percentages["pct_contradicted"],
+        count_supported=counts["count_supported"],
+        count_unsupported=counts["count_unsupported"],
+        count_contradicted=counts["count_contradicted"],
         dead_references=[r for r in references if r.status == ReferenceStatus.DEAD],
         inaccessible_references=[r for r in references if r.status == ReferenceStatus.INACCESSIBLE],
         reference_stats=build_reference_stats(chunks, references, results),

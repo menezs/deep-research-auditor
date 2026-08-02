@@ -63,6 +63,75 @@ def test_transient_error_then_success_recovers(mock_get, _mock_sleep):
     assert mock_get.call_count == 2
 
 
+@patch("auditframework.ingestion.fetcher.requests.get")
+def test_url_with_percent20_falls_back_to_hyphen_variant_on_404(mock_get):
+    """Regressao: URLs reconstruidas pela extracao com `%20` no lugar de
+    um ponto de quebra de linha ambiguo (poderia ser `-` ou nenhum
+    separador) devem tentar essas variantes antes de desistir — mesma
+    tecnica do CorpusForge (`_try_url_variations`)."""
+
+    def side_effect(url, **kwargs):
+        if url == "https://example.com/doenca%20de-alzheimer":
+            return _response(404)
+        if url == "https://example.com/doenca-de-alzheimer":
+            return _response(200, b"ok")
+        raise AssertionError(f"URL inesperada: {url}")
+
+    mock_get.side_effect = side_effect
+    fetcher = HttpFetcher()
+
+    result = fetcher.fetch("https://example.com/doenca%20de-alzheimer")
+
+    assert result.content == b"ok"
+    assert mock_get.call_count == 2
+
+
+@patch("auditframework.ingestion.fetcher.requests.get")
+def test_url_with_percent20_falls_back_to_no_separator_variant(mock_get):
+    """A variante `-` tambem pode falhar (ex: a URL real nao tinha
+    separador nenhum no ponto de quebra) — nesse caso tenta a variante
+    sem separador antes de desistir."""
+
+    def side_effect(url, **kwargs):
+        if url == "https://example.com/do%20enca":
+            return _response(404)
+        if url == "https://example.com/do-enca":
+            return _response(404)
+        if url == "https://example.com/doenca":
+            return _response(200, b"ok")
+        raise AssertionError(f"URL inesperada: {url}")
+
+    mock_get.side_effect = side_effect
+    fetcher = HttpFetcher()
+
+    result = fetcher.fetch("https://example.com/do%20enca")
+
+    assert result.content == b"ok"
+    assert mock_get.call_count == 3
+
+
+@patch("auditframework.ingestion.fetcher.requests.get")
+def test_url_with_percent20_raises_original_error_when_no_variant_works(mock_get):
+    mock_get.return_value = _response(404)
+    fetcher = HttpFetcher()
+
+    with pytest.raises(DeadReferenceError, match="doenca%20de-alzheimer"):
+        fetcher.fetch("https://example.com/doenca%20de-alzheimer")
+
+    assert mock_get.call_count == 3  # original + 2 variantes
+
+
+@patch("auditframework.ingestion.fetcher.requests.get")
+def test_url_without_percent20_does_not_try_variants_on_404(mock_get):
+    mock_get.return_value = _response(404)
+    fetcher = HttpFetcher()
+
+    with pytest.raises(DeadReferenceError):
+        fetcher.fetch("https://example.com/pagina-normal")
+
+    assert mock_get.call_count == 1
+
+
 @patch("auditframework.ingestion.fetcher.HttpFetcher.fetch_via_playwright")
 @patch("auditframework.ingestion.fetcher.requests.get")
 def test_403_falls_back_to_cloudscraper_then_playwright(mock_get, mock_playwright):
