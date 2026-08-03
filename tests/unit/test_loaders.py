@@ -100,6 +100,69 @@ class TestDocxAnswerLoader:
         text = DocxAnswerLoader().load(path)
         assert "https://example.com/artigo" in text
 
+    def test_table_content_is_included_between_surrounding_paragraphs(self, tmp_path):
+        """Regressao: `document.paragraphs` nao inclui paragrafos dentro de
+        tabelas — uma tabela inteira (com suas citacoes) desaparecia do
+        texto extraido, confirmado contra um .docx real de Deep Research
+        cuja tabela comparativa de bilheteria sumia por completo."""
+        import docx
+
+        document = docx.Document()
+        document.add_paragraph("Paragrafo antes da tabela.")
+        table = document.add_table(rows=2, cols=2)
+        table.rows[0].cells[0].text = "Filme"
+        table.rows[0].cells[1].text = "Bilheteira"
+        table.rows[1].cells[0].text = "Avengers: Endgame"
+        cell = table.rows[1].cells[1]
+        cell.paragraphs[0].text = ""
+        p = cell.paragraphs[0]
+        p.add_run("2,717B")
+        sup_run = p.add_run("1")
+        sup_run.font.superscript = True
+        document.add_paragraph("Paragrafo depois da tabela.")
+        path = tmp_path / "resposta.docx"
+        document.save(path)
+
+        text = DocxAnswerLoader().load(path)
+
+        before_idx = text.index("Paragrafo antes da tabela.")
+        table_idx = text.index("Avengers: Endgame")
+        after_idx = text.index("Paragrafo depois da tabela.")
+        assert before_idx < table_idx < after_idx
+        assert "2,717B[1]" in text
+
+    def test_table_cell_with_multiple_paragraphs_joins_them(self, tmp_path):
+        import docx
+
+        document = docx.Document()
+        table = document.add_table(rows=1, cols=1)
+        cell = table.rows[0].cells[0]
+        cell.paragraphs[0].text = "Primeira linha"
+        cell.add_paragraph("Segunda linha")
+        path = tmp_path / "resposta.docx"
+        document.save(path)
+
+        text = DocxAnswerLoader().load(path)
+        assert "Primeira linha\n\nSegunda linha" in text
+
+    def test_table_row_with_only_empty_cells_is_skipped(self, tmp_path):
+        import docx
+
+        document = docx.Document()
+        document.add_paragraph("Antes.")
+        table = document.add_table(rows=2, cols=2)
+        table.rows[0].cells[0].text = "Dado"
+        table.rows[0].cells[1].text = "Valor"
+        # linha 1 (indice 1) permanece com celulas vazias de proposito
+        document.add_paragraph("Depois.")
+        path = tmp_path / "resposta.docx"
+        document.save(path)
+
+        text = DocxAnswerLoader().load(path)
+        lines = [line for line in text.split("\n\n") if line.strip()]
+        assert "" not in lines
+        assert "Antes." in text and "Depois." in text
+
     def test_superscript_inside_hyperlink_is_still_wrapped(self, tmp_path):
         import docx
 

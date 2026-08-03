@@ -51,6 +51,30 @@ def _docx_paragraph_markdown(paragraph) -> str:
     return f"{'#' * level} {text.strip()}" if level else text
 
 
+def _docx_table_markdown(table) -> str:
+    """Reconstroi uma tabela como blocos de texto (uma linha por bloco),
+    reaproveitando `_docx_paragraph_markdown` por celula para preservar
+    marcadores de citacao (superscript -> `[N]`) — sem isso, tabelas de
+    resposta (comuns em respostas de Deep Research, ex: comparativos de
+    bilheteira) desapareciam por completo do texto extraido, pois
+    `document.paragraphs` nao inclui paragrafos dentro de tabelas."""
+    rows_text: list[str] = []
+    for row in table.rows:
+        seen_cells: set[int] = set()
+        cells_text: list[str] = []
+        for cell in row.cells:
+            if id(cell._tc) in seen_cells:  # celula duplicada por merge horizontal
+                continue
+            seen_cells.add(id(cell._tc))
+            cell_text = "\n\n".join(_docx_paragraph_markdown(p) for p in cell.paragraphs if p.text.strip())
+            if cell_text.strip():
+                cells_text.append(cell_text)
+        row_text = " ".join(cells_text)
+        if row_text.strip():
+            rows_text.append(row_text)
+    return "\n\n".join(rows_text)
+
+
 class AnswerLoader(Protocol):
     def load(self, path: Path) -> str: ...
 
@@ -70,10 +94,14 @@ class PdfAnswerLoader:
 class DocxAnswerLoader:
     def load(self, path: Path) -> str:
         import docx
+        from docx.table import Table
 
         document = docx.Document(str(path))
-        paragraphs = [_docx_paragraph_markdown(p) for p in document.paragraphs]
-        return "\n\n".join(p for p in paragraphs if p.strip())
+        blocks = [
+            _docx_table_markdown(item) if isinstance(item, Table) else _docx_paragraph_markdown(item)
+            for item in document.iter_inner_content()
+        ]
+        return "\n\n".join(b for b in blocks if b.strip())
 
 
 _LOADERS: dict[str, AnswerLoader] = {
