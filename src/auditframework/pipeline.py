@@ -308,13 +308,14 @@ class JudgingStage:
         curated_by_chunk: dict[str, CuratedDocument] = {}
         for chunk in tqdm(pending, desc="Recuperando contexto", unit="chunk", colour=STAGE_COLORS["judging"]):
             curated_path = curated_dir / f"curated_{chunk.id}.json"
+            md_path = curated_dir / f"curated_{chunk.id}.md"
             if curated_path.exists():
-                curated_by_chunk[chunk.id] = CuratedDocument.model_validate_json(
-                    curated_path.read_text(encoding="utf-8")
-                )
-                continue
-            curated = retriever.retrieve(chunk)
-            curated_path.write_text(curated.model_dump_json(indent=2), encoding="utf-8")
+                curated = CuratedDocument.model_validate_json(curated_path.read_text(encoding="utf-8"))
+            else:
+                curated = retriever.retrieve(chunk)
+                curated_path.write_text(curated.model_dump_json(indent=2), encoding="utf-8")
+            if not md_path.exists():
+                md_path.write_text(curated.assembled_context, encoding="utf-8")
             curated_by_chunk[chunk.id] = curated
 
         with results_path.open("a", encoding="utf-8") as fh, skipped_path.open("a", encoding="utf-8") as skipped_fh:
