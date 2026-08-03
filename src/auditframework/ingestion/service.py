@@ -9,7 +9,7 @@ from typing import Protocol
 from tqdm import tqdm
 
 from ..common.errors import DeadReferenceError, ExtractionError, InaccessibleReferenceError
-from ..logging_config import get_logger
+from ..logging_config import STAGE_COLORS, get_logger
 from ..models import Document, Reference, ReferenceStatus
 from .converters import convert_to_markdown
 from .fetcher import FetchResult, HttpFetcher
@@ -67,7 +67,11 @@ def ingest_references(
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_ref = {executor.submit(_ingest_one, ref, fetcher): ref for ref in pending}
         for future in tqdm(
-            as_completed(future_to_ref), total=len(future_to_ref), desc="Baixando referências", unit="ref"
+            as_completed(future_to_ref),
+            total=len(future_to_ref),
+            desc="Baixando referências",
+            unit="ref",
+            colour=STAGE_COLORS["ingestion"],
         ):
             new_ref, document, markdown = future.result()
             updated[new_ref.id] = new_ref

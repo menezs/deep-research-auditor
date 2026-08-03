@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,7 +28,7 @@ from .indexing.vector_store import FaissVectorStore
 from .ingestion.service import Fetcher, ingest_references
 from .ingestion.registry import ReferenceRegistry
 from .judging.judge import Verifier
-from .logging_config import get_logger
+from .logging_config import STAGE_COLORS, get_logger, stage_banner, stage_done, stage_skipped
 from .models import AnswerChunk, AuditResult, CuratedDocument, SkippedChunk
 from .reporting.aggregator import aggregate_report
 from .reporting.render import render_json, render_markdown
@@ -305,7 +306,7 @@ class JudgingStage:
         )
 
         curated_by_chunk: dict[str, CuratedDocument] = {}
-        for chunk in tqdm(pending, desc="Recuperando contexto", unit="chunk"):
+        for chunk in tqdm(pending, desc="Recuperando contexto", unit="chunk", colour=STAGE_COLORS["judging"]):
             curated_path = curated_dir / f"curated_{chunk.id}.json"
             if curated_path.exists():
                 curated_by_chunk[chunk.id] = CuratedDocument.model_validate_json(
@@ -317,7 +318,7 @@ class JudgingStage:
             curated_by_chunk[chunk.id] = curated
 
         with results_path.open("a", encoding="utf-8") as fh, skipped_path.open("a", encoding="utf-8") as skipped_fh:
-            for chunk in tqdm(pending, desc="Julgando chunks", unit="chunk"):
+            for chunk in tqdm(pending, desc="Julgando chunks", unit="chunk", colour=STAGE_COLORS["judging"]):
                 curated = curated_by_chunk[chunk.id]
                 if curated.skip_reason is not None:
                     logger.warning("Chunk %s nao auditado: %s", chunk.id, curated.skip_reason)
@@ -390,12 +391,15 @@ class Pipeline:
 
     def run(self, ctx: RunContext) -> RunContext:
         ctx.stages_completed = _load_stage_state(ctx.run_dir)
-        for stage in self._stages:
+        total = len(self._stages)
+        for index, stage in enumerate(self._stages, start=1):
             if stage.name in ctx.stages_completed:
-                logger.info("Pulando estagio ja concluido: %s", stage.name)
+                stage_skipped(stage.name)
                 continue
-            logger.info("Executando estagio: %s", stage.name)
+            stage_banner(stage.name, index, total)
+            started = time.monotonic()
             stage.run(ctx)
+            stage_done(stage.name, time.monotonic() - started)
             ctx.stages_completed.append(stage.name)
             _save_stage_state(ctx.run_dir, ctx.stages_completed)
         return ctx

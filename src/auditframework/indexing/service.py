@@ -4,7 +4,7 @@ from typing import Callable
 
 from tqdm import tqdm
 
-from ..logging_config import get_logger
+from ..logging_config import STAGE_COLORS, get_logger
 from ..models import Document, ReferenceChunk
 from .chunkers import DocumentChunker
 from .embeddings import Embedder
@@ -28,7 +28,7 @@ def build_index(
 
     all_chunks: list[ReferenceChunk] = []
     next_id = 0
-    for document in tqdm(documents, desc="Extraindo chunks de documentos", unit="doc"):
+    for document in tqdm(documents, desc="Extraindo chunks de documentos", unit="doc", colour=STAGE_COLORS["indexing"]):
         markdown = read_markdown(document.reference_id)
         chunks = chunker.chunk(reference_id=document.reference_id, markdown=markdown, start_id=next_id)
         next_id += len(chunks)
