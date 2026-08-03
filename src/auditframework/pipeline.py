@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -13,7 +12,11 @@ from tqdm import tqdm
 from .common.errors import ConfigurationError, LLMParseError
 from .config import Settings
 from .extraction.loaders import load_answer
-from .extraction.reference_extractor import ReferenceExtractionStrategy, extract_references
+from .extraction.reference_extractor import (
+    _REFERENCE_SECTION_HEADING,
+    ReferenceExtractionStrategy,
+    extract_references,
+)
 from .common.llm_client import LLMClient, create_llm_client
 from .indexing.chunkers import AnswerChunker, DocumentChunker
 from .indexing.embeddings import BGEEmbedder, Embedder
@@ -30,11 +33,6 @@ from .reporting.aggregator import aggregate_report
 from .reporting.render import render_json, render_markdown
 
 logger = get_logger(__name__)
-
-_REFERENCE_SECTION_HEADING = re.compile(
-    r"^#{1,6}\s*(refer[eê]ncias|references|fontes|sources|bibliografia)\s*$",
-    re.IGNORECASE | re.MULTILINE,
-)
 
 
 def _strip_reference_section(text: str) -> str:

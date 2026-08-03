@@ -266,8 +266,9 @@ class TestRepairUsingPdfLinks:
 
     def test_truncated_lookalike_link_is_not_picked_by_mistake(self, tmp_path):
         """Um PDF pode ter mais de um hyperlink parecido (ex: um vindo de
-        uma tabela markdown corrompida) — o reparo so deve trocar a URL
-        quando a chave difusa bate EXATAMENTE, nunca por parecenca parcial."""
+        uma tabela markdown corrompida) — quando a URL extraida ja bate
+        EXATAMENTE (chave difusa) com um candidato, esse candidato vence
+        na hora, sem sequer considerar o outro por parecenca parcial."""
         pytest.importorskip("fitz")
         pdf_path = tmp_path / "resposta.pdf"
         self._make_pdf(
@@ -312,9 +313,117 @@ class TestRepairUsingPdfLinks:
         )
         refs = extract_references(text, source_answer_id="a1", tool_name="ChatGPT", answer_path=pdf_path)
 
-        # a segunda ("...paginaX") nao bate na chave difusa com o link do
-        # pdf, entao so a primeira e reparada -- confirma que so ha 1
-        # merge por chave exata, nao um colapso indevido de referencias
-        # genuinamente diferentes
+        # a segunda ("...paginaX") tem um caractere A MAIS que o link do
+        # pdf -- nunca pode ser reparada por um mecanismo que so tolera
+        # caracteres FALTANDO (ligadura), entao so a primeira e reparada;
+        # confirma que duas referencias genuinamente diferentes no mesmo
+        # texto nao colapsam indevidamente na mesma
         urls = sorted(r.raw_url for r in refs)
         assert urls == ["https://example.com/mesma-pagina", "https://example.com/mesma-paginaX"]
+
+    def test_letters_dropped_by_font_ligature_are_restored(self, tmp_path):
+        """Corrupcao distinta do hifen/espaco: a fonte incorporada do PDF
+        tem glifos de ligadura (ex: "tt", "fi") sem mapeamento ToUnicode
+        completo, entao letras inteiras somem do texto extraido sem
+        deixar sinal nenhum ("https" -> "htps", "office" -> "ofce") —
+        corrompe ate o esquema da URL, entao so aparece via o formato de
+        lista `<u>...</u>` (que nao valida esquema, ao contrario de
+        `_extract_url`/`_URL_RE`), exatamente como no PDF real do Gemini.
+        A chave difusa (so hifen/espaco) nao repara isso, precisa do
+        casamento por subsequencia."""
+        pytest.importorskip("fitz")
+        pdf_path = tmp_path / "resposta.pdf"
+        self._make_pdf(pdf_path, ["https://example.com/wiki/List_of_films"])
+
+        text = "### **Referências citadas**\n\n1. Titulo, <u>htps://example.com/wiki/List_of_flms</u>\n"
+        refs = extract_references(text, source_answer_id="a1", tool_name="Gemini", answer_path=pdf_path)
+
+        assert refs[0].raw_url == "https://example.com/wiki/List_of_films"
+
+    def test_too_many_dropped_characters_is_not_repaired(self, tmp_path):
+        """O reparo por subsequencia tem um orcamento pequeno de
+        caracteres faltando (`_MAX_DROPPED_CHARS`) — uma URL extraida
+        curta demais (muito mais corrompida do que uma ligadura tipica
+        deixaria) nao deve ser forcada contra um candidato so porque
+        tecnicamente e uma subsequencia dele."""
+        pytest.importorskip("fitz")
+        pdf_path = tmp_path / "resposta.pdf"
+        self._make_pdf(pdf_path, ["https://example.com/wiki/List_of_marvel_cinematic_universe_films"])
+
+        text = "### **Referências citadas**\n\n1. Titulo, <u>htps://example.com/wiki/Lst_of_films</u>\n"
+        refs = extract_references(text, source_answer_id="a1", tool_name="Gemini", answer_path=pdf_path)
+
+        assert refs[0].raw_url == "htps://example.com/wiki/Lst_of_films"
+
+
+class TestReferenceSectionHeadingTolerance:
+    """`_REFERENCE_SECTION_HEADING` ancora tanto `_find_asterism_list_entries`
+    (quando nao ha `⁂`) quanto `_find_heading_titled_pairs` — precisa
+    tolerar negrito markdown e texto extra depois da palavra-chave (ex: o
+    Gemini em PDF usa `### **Referências citadas**`, nao so `Referências`)."""
+
+    def test_bold_wrapped_heading_with_extra_trailing_words_anchors_numbered_list(self):
+        text = (
+            "Corpo da resposta com uma alegacao[1].\n\n"
+            "### **Referências citadas**\n\n"
+            "1. Titulo do artigo, <u>https://example.com/artigo</u>\n"
+        )
+        refs = extract_references(text, source_answer_id="a1", tool_name="Gemini")
+        assert len(refs) == 1
+        assert refs[0].raw_url == "https://example.com/artigo"
+        assert refs[0].citation_markers == ["[1]"]
+
+
+class TestHeadingAnchoredNumberedList:
+    """Formato do Gemini em PDF: mesma gramatica numerada+`<u>` do
+    Perplexity, mas sem `⁂` nenhum — ancorada so pelo cabecalho da secao."""
+
+    def test_numbered_list_with_title_before_url_is_extracted_without_asterism(self):
+        text = (
+            "### **Referências citadas**\n\n"
+            "1. List of films - Wikipedia, \n\n"
+            "   - <u>https://example.com/um</u> \n\n"
+            "2. Outline - Wikipedia, <u>https://example.com/dois</u> \n"
+        )
+        refs = extract_references(text, source_answer_id="a1", tool_name="Gemini")
+        by_marker = {r.citation_markers[0]: r.raw_url for r in refs}
+        assert by_marker == {
+            "[1]": "https://example.com/um",
+            "[2]": "https://example.com/dois",
+        }
+
+
+class TestHeadingTitledPairsFormat:
+    """Formato do Gemini em .docx: "Titulo, URL" por linha, sem numeracao
+    nem marcacao nenhuma — ancorado so pelo cabecalho da secao de fontes
+    (nunca por `⁂`, que e exclusivo do Perplexity). Marcador `[N]`
+    inferido pela ordem de ocorrencia, com o titulo capturado."""
+
+    def test_titled_pairs_get_positional_markers_and_titles(self):
+        text = (
+            "#### Referências citadas\n\n"
+            "List of Marvel films - Wikipedia, https://example.com/um\n\n"
+            "Outline of Marvel - Wikipedia, https://example.com/dois\n"
+        )
+        refs = extract_references(text, source_answer_id="a1", tool_name="Gemini")
+        by_marker = {r.citation_markers[0]: r for r in refs}
+        assert by_marker["[1]"].raw_url == "https://example.com/um"
+        assert by_marker["[1]"].title == "List of Marvel films - Wikipedia"
+        assert by_marker["[2]"].raw_url == "https://example.com/dois"
+
+    def test_only_used_as_last_resort_when_no_other_format_matches(self):
+        """Se o formato `[N] Titulo\\nURL` ja encontrou algo, o fallback
+        de pares sem marcacao nunca deve rodar (evita duplicar/competir)."""
+        text = (
+            "[1] Titulo\nhttps://example.com/bracket\n\n"
+            "#### Referências\n\n"
+            "Outro titulo, https://example.com/nao-deveria-aparecer\n"
+        )
+        refs = extract_references(text, source_answer_id="a1", tool_name="ChatGPT")
+        assert len(refs) == 1
+        assert refs[0].raw_url == "https://example.com/bracket"
+
+    def test_document_without_reference_heading_is_unaffected(self):
+        text = "Corpo qualquer sem nenhuma lista de fontes.\n"
+        refs = extract_references(text, source_answer_id="a1", tool_name="Gemini")
+        assert refs == []
