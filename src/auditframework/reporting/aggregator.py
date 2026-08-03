@@ -57,9 +57,14 @@ def build_reference_stats(
     chunks que a citam foram julgados. Junta `AnswerChunk.cited_reference_ids`
     (a citacao real, ja resolvida na Fase 2) com o `AuditResult` do juiz
     (Fase 3) via `answer_chunk_id` — no audit_with_llm original essa
-    correspondencia era feita hoje so manualmente, lendo o `.md` a mao."""
+    correspondencia era feita hoje so manualmente, lendo o `.md` a mao.
+
+    Cobre TODAS as referencias extraidas (`references`), nao so as que
+    aparecem em `chunk.cited_reference_ids` — uma referencia listada na
+    resposta mas nunca citada por nenhum chunk auditado (times_cited=0)
+    ainda deve ser visivel na secao 4 do relatorio, em vez de desaparecer
+    silenciosamente."""
     result_by_chunk = {r.answer_chunk_id: r for r in results}
-    reference_by_id = {ref.id: ref for ref in references}
 
     times_cited: dict[str, int] = defaultdict(int)
     verdict_counts: dict[str, Counter] = defaultdict(Counter)
@@ -73,16 +78,15 @@ def build_reference_stats(
 
     stats = [
         ReferenceStats(
-            reference_id=ref_id,
-            url=reference_by_id[ref_id].raw_url,
-            times_cited=count,
-            supported_count=verdict_counts[ref_id].get(AuditVerdict.SUPPORTED, 0),
-            unsupported_count=verdict_counts[ref_id].get(AuditVerdict.UNSUPPORTED, 0),
-            contradicted_count=verdict_counts[ref_id].get(AuditVerdict.CONTRADICTED, 0),
-            status=reference_by_id[ref_id].status,
+            reference_id=ref.id,
+            url=ref.raw_url,
+            times_cited=times_cited.get(ref.id, 0),
+            supported_count=verdict_counts[ref.id].get(AuditVerdict.SUPPORTED, 0),
+            unsupported_count=verdict_counts[ref.id].get(AuditVerdict.UNSUPPORTED, 0),
+            contradicted_count=verdict_counts[ref.id].get(AuditVerdict.CONTRADICTED, 0),
+            status=ref.status,
         )
-        for ref_id, count in times_cited.items()
-        if ref_id in reference_by_id
+        for ref in references
     ]
     stats.sort(key=lambda s: s.times_cited, reverse=True)
     return stats

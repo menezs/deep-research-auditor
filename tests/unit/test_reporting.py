@@ -115,6 +115,24 @@ class TestBuildReferenceStats:
         assert stats[0].times_cited == 1
         assert stats[0].supported_count == 0
 
+    def test_reference_never_cited_by_any_chunk_still_appears_zeroed(self):
+        """Uma referencia extraida da resposta mas nunca citada por nenhum
+        chunk (ex: link listado no rodape mas sem chunk correspondente)
+        deve continuar visivel na secao 4 do relatorio, com times_cited=0,
+        em vez de desaparecer silenciosamente."""
+        references = [_reference("r1"), _reference("r2")]
+        chunks = [_chunk("c1", ["r1"])]
+        results = [_result("c1", AuditVerdict.SUPPORTED)]
+
+        stats = build_reference_stats(chunks, references, results)
+        stats_by_id = {s.reference_id: s for s in stats}
+
+        assert set(stats_by_id) == {"r1", "r2"}
+        assert stats_by_id["r2"].times_cited == 0
+        assert stats_by_id["r2"].supported_count == 0
+        assert stats_by_id["r2"].unsupported_count == 0
+        assert stats_by_id["r2"].contradicted_count == 0
+
 
 class TestAggregateReport:
     def test_percentages_and_totals_are_computed_correctly(self):
