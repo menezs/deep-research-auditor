@@ -4,24 +4,10 @@ Framework para auditar automaticamente se as respostas produzidas por
 ferramentas de Deep Research (ChatGPT, Gemini, Perplexity, etc.) sao
 realmente suportadas pelas referencias que elas citam.
 
-Unifica em um unico pacote Python o que antes eram tres projetos
-independentes e manuais:
-
-- **extraction/ingestion** (ex-`CorpusForge`) — extrai as referencias
-  citadas em uma resposta e baixa/converte o conteudo citado para markdown.
-- **indexing** (ex-`syntex`) — indexa os documentos baixados em um FAISS
-  local e recupera, para cada trecho da resposta, apenas os trechos das
-  referencias que ele de fato cita.
-- **judging** (ex-`audit_with_llm`) — usa um LLM como juiz para classificar
-  cada trecho como suportado/nao suportado/contraditado pelo contexto
-  curado.
-- **reporting** (novo — nao existia em codigo em nenhum dos tres
-  repositorios originais) — agrega os resultados num relatorio final
-  (Markdown/JSON).
-
-O documento de arquitetura original (analise critica dos tres
-repositorios + roteiro de migracao completo) esta em
-`/home/menezes/.claude/plans/voc-um-engenheiro-harmonic-sphinx.md`.
+O pipeline extrai as referencias citadas numa resposta, baixa e converte
+o conteudo citado, indexa esse conteudo, usa um LLM como juiz para
+classificar cada trecho da resposta como suportado/nao suportado/
+contraditado pelo contexto recuperado, e agrega tudo num relatorio final.
 
 ## Arquitetura
 
@@ -58,32 +44,32 @@ flowchart TD
 ```
 
 Cada seta é uma função que recebe/devolve um modelo Pydantic — nunca um
-path de arquivo ou uma posição de lista como contrato implícito (o
-problema central dos três repositórios originais). `pipeline.py`
-orquestra os cinco estágios sobre esse contrato, persistindo cada etapa
-em `data/runs/<run_id>/` para permitir retomada (`audit resume`).
+path de arquivo ou uma posição de lista como contrato implícito.
+`pipeline.py` orquestra os cinco estágios sobre esse contrato,
+persistindo cada etapa em `data/runs/<run_id>/` para permitir retomada
+(`audit resume`).
 
 ### Estrutura de diretórios
 
 ```
 src/auditframework/
-├── cli.py               # audit run/resume/report/compare (Command)
-├── pipeline.py          # Pipeline + RunContext + 5 stages (DI)
-├── config.py            # Settings unico (pydantic-settings)
+├── cli.py             # audit run/resume/report/compare (Command)
+├── pipeline.py         # Pipeline + RunContext + 5 stages (DI)
+├── config.py           # Settings unico (pydantic-settings)
 ├── logging_config.py
-├── models/              # contrato compartilhado (Pydantic)
-│   ├── reference.py     # Reference, ReferenceStatus
-│   ├── document.py      # Document
-│   ├── chunk.py         # AnswerChunk, ReferenceChunk
-│   ├── curated.py       # RetrievedPassage, CuratedDocument
-│   ├── audit_result.py  # AuditVerdict, AuditResult
-│   └── report.py        # Report, ReferenceStats, ToolStats
-├── extraction/          # ex-CorpusForge (parte 1): resposta -> Reference
-├── ingestion/           # ex-CorpusForge (parte 2): Reference -> Document
-├── indexing/            # ex-syntex: chunking, embeddings, FAISS, retrieval
-├── judging/             # ex-audit_with_llm: juiz LLM
-├── reporting/           # novo: agregacao + render do relatorio final
-└── common/              # erros tipados, LLMClient compartilhado, pricing
+├── models/             # contrato compartilhado (Pydantic)
+│   ├── reference.py    # Reference, ReferenceStatus
+│   ├── document.py     # Document
+│   ├── chunk.py        # AnswerChunk, ReferenceChunk
+│   ├── curated.py      # RetrievedPassage, CuratedDocument
+│   ├── audit_result.py # AuditVerdict, AuditResult, SkippedChunk
+│   └── report.py       # Report, JudgeConfig, ReferenceStats, ToolStats
+├── extraction/         # resposta -> Reference (extracao de citacoes)
+├── ingestion/          # Reference -> Document (download + conversao)
+├── indexing/           # chunking de documentos, embeddings, FAISS, retrieval
+├── judging/            # juiz LLM
+├── reporting/          # agregacao + render do relatorio final
+└── common/             # erros tipados, LLMClient compartilhado, pricing
 ```
 
 ### Padrões de projeto aplicados
@@ -107,21 +93,22 @@ src/auditframework/
 - **Factory** — `create_llm_client(settings)`, `build_pipeline(settings)`.
 - **Erros tipados** — hierarquia em `common/errors.py`
   (`DeadReferenceError`, `InaccessibleReferenceError`, `LLMParseError`,
-  `LLMProviderError`, ...) substituindo o casamento de substring em texto
-  livre usado nos repositórios originais para decidir o que é "retryable".
+  `LLMProviderError`, ...), cada situação de falha vira um tipo explícito
+  em vez de casamento de substring em texto de erro livre.
 
 ### Contrato de dados (resumo)
 
 `Reference` (id estável por hash de URL) → `Document` (conteúdo baixado)
 → `AnswerChunk`/`ReferenceChunk` (chunking) → `CuratedDocument` (contexto
 recuperado e escopado — ou `skip_reason` setado quando não há evidência
-citada disponível, ver `--full-corpus` acima) → `AuditResult` (veredito do
+citada disponível, ver `--full-corpus` abaixo) → `AuditResult` (veredito do
 juiz — apenas `SUPPORTED`/`UNSUPPORTED`/`CONTRADICTED`; uma falha de
 parsing da saída do LLM juiz nunca é coagida silenciosamente para um
 desses vereditos — o chunk é pulado com um aviso e fica pendente para uma
 próxima `audit resume`, sem derrubar o restante do run) / `SkippedChunk`
 (chunk não julgado por falta de evidência citada, com justificativa) →
-`Report` (agregação final). Definições completas em
+`Report` (agregação final, incluindo o `JudgeConfig` — modelo/provider/
+parâmetros do LLM juiz usados na run). Definições completas em
 `src/auditframework/models/`.
 
 ## Instalacao (desenvolvimento)
@@ -245,6 +232,32 @@ que usa o mesmo `LLMClient` do estágio de julgamento — hoje disponível
 para uso programático (`Pipeline`/`ExtractionStage` aceitam qualquer
 `ReferenceExtractionStrategy` via construtor), sem uma flag de CLI
 dedicada ainda.
+
+## Relatório final
+
+Cada run gera, em `data/runs/<run_id>/`, `report.md` (legível) e
+`report.json` (mesmos dados, para consumo programático). Seções do
+`report.md`:
+
+1. **Metadados da Execução** — run id, ferramenta, tempo de
+   processamento e o modelo/provider/parâmetros (`temperature`,
+   `max_retries`, `retry_delay`, `base_url` quando aplicável) do LLM
+   juiz usado nessa run — persistido para consulta posterior, mesmo que
+   a configuração (`.env`) mude depois.
+2. **Distribuição de Vereditos** — contagem e percentual de
+   SUPPORTED/UNSUPPORTED/CONTRADICTED (e SKIPPED, quando houver).
+3. **Custo e Uso de Tokens** — custo total estimado, tokens totais e
+   médias por requisição ao juiz.
+4. **Análise por Referência** — tabela por referência citada (status,
+   número de citações, distribuição de veredito), incluindo quantas e
+   qual percentual das referências extraídas não foram citadas por
+   nenhum chunk julgado.
+5. **Referências Mortas e Inacessíveis** — referências com HTTP 404 ou
+   inacessíveis (403/timeout/SSL) após esgotar as estratégias de fetch.
+6. **Exemplos Representativos por Veredito** — até 3 exemplos por
+   veredito, com o trecho da resposta e a justificativa do juiz.
+7. **Chunks Não Auditados** — chunks pulados (sem evidência citada
+   disponível) e o motivo.
 
 ## Testes
 

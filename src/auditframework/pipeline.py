@@ -29,7 +29,7 @@ from .ingestion.service import Fetcher, ingest_references
 from .ingestion.registry import ReferenceRegistry
 from .judging.judge import Verifier
 from .logging_config import STAGE_COLORS, get_logger, stage_banner, stage_done, stage_skipped
-from .models import AnswerChunk, AuditResult, CuratedDocument, SkippedChunk
+from .models import AnswerChunk, AuditResult, CuratedDocument, JudgeConfig, SkippedChunk
 from .reporting.aggregator import aggregate_report
 from .reporting.render import render_json, render_markdown
 
@@ -359,6 +359,16 @@ class ReportingStage:
         started_at = datetime.fromisoformat(ctx.started_at)
         processing_time = (datetime.now(timezone.utc) - started_at).total_seconds()
 
+        settings = ctx.settings
+        judge_config = JudgeConfig(
+            provider=settings.llm_provider,
+            model=settings.llm_model,
+            temperature=settings.llm_temperature,
+            max_retries=settings.llm_max_retries,
+            retry_delay=settings.llm_retry_delay,
+            base_url=settings.llm_base_url if settings.llm_provider != "anthropic" else None,
+        )
+
         report = aggregate_report(
             run_id=ctx.run_id,
             answer_id=ctx.run_id,
@@ -368,6 +378,7 @@ class ReportingStage:
             results=results,
             skipped=skipped,
             processing_time_seconds=processing_time,
+            judge_config=judge_config,
         )
         (ctx.run_dir / "report.md").write_text(
             render_markdown(report, chunks=chunks, references=references, results=results), encoding="utf-8"

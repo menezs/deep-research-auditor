@@ -26,11 +26,27 @@ class ToolStats(BaseModel):
     total_chunks: int
 
 
+class JudgeConfig(BaseModel):
+    """Modelo e parametros do LLM-juiz usados nesta execucao — persistido
+    no `Report` para permitir consulta posterior (ex: comparar runs feitas
+    com juizes diferentes) sem depender de reconstituir o `Settings`
+    original, que pode ter mudado desde entao."""
+
+    provider: str
+    model: str
+    temperature: float
+    max_retries: int
+    retry_delay: float
+    base_url: str | None = None
+
+
 class Report(BaseModel):
     run_id: str
     answer_id: str
     tool_name: str
     generated_at: datetime
+
+    judge_config: JudgeConfig | None = None
 
     total_chunks: int = 0
 

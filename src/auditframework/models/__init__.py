@@ -3,7 +3,7 @@ from .chunk import AnswerChunk, ReferenceChunk
 from .curated import CuratedDocument, RetrievedPassage
 from .document import Document
 from .reference import Reference, ReferenceStatus
-from .report import Report, ReferenceStats, ToolStats
+from .report import JudgeConfig, Report, ReferenceStats, ToolStats
 
 __all__ = [
     "AuditResult",
@@ -17,6 +17,7 @@ __all__ = [
     "Reference",
     "ReferenceStatus",
     "Report",
+    "JudgeConfig",
     "ReferenceStats",
     "ToolStats",
 ]

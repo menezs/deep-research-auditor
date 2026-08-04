@@ -75,6 +75,15 @@ class ReportRenderer:
             ("Total de chunks", str(report.total_chunks)),
             ("Tempo de processamento", f"{report.processing_time_seconds:.1f}s"),
         ]
+        judge = report.judge_config
+        if judge is not None:
+            rows.append(("Modelo do juiz LLM", judge.model))
+            rows.append(("Provider do juiz LLM", judge.provider))
+            rows.append(("Temperature", str(judge.temperature)))
+            rows.append(("Max retries", str(judge.max_retries)))
+            rows.append(("Retry delay", f"{judge.retry_delay}s"))
+            if judge.base_url:
+                rows.append(("Base URL", judge.base_url))
         table = "\n".join(f"| **{label}** | {value} |" for label, value in rows)
         return "## 1. Metadados da Execução\n\n| Campo | Valor |\n|---|---|\n" + table
 
@@ -114,8 +123,13 @@ class ReportRenderer:
         stats = self.report.reference_stats
         if not stats:
             return "## 4. Análise por Referência\n\nNenhuma referência citada nos chunks avaliados."
+        total = len(stats)
+        uncited = sum(1 for s in stats if s.times_cited == 0)
+        pct_uncited = (uncited / total) * 100.0
+        summary = (
+            f"Referências sem nenhuma citação: {uncited}/{total} ({pct_uncited:.1f}%)\n\n"
+        )
         header = (
-            "## 4. Análise por Referência\n\n"
             "| Referência | Status | Citações | SUPPORTED | UNSUPPORTED | CONTRADICTED |\n"
             "|---|---|---|---|---|---|\n"
         )
@@ -124,7 +138,7 @@ class ReportRenderer:
             f"{s.supported_count} | {s.unsupported_count} | {s.contradicted_count} |"
             for s in stats
         )
-        return header + rows
+        return "## 4. Análise por Referência\n\n" + summary + header + rows
 
     def _reference_label(self, reference_id: str, fallback_url: str) -> str:
         reference = self._reference_by_id.get(reference_id)

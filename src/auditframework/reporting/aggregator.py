@@ -7,6 +7,7 @@ from ..models import (
     AnswerChunk,
     AuditResult,
     AuditVerdict,
+    JudgeConfig,
     Reference,
     ReferenceStats,
     ReferenceStatus,
@@ -103,6 +104,7 @@ def aggregate_report(
     skipped: list[SkippedChunk] | None = None,
     processing_time_seconds: float = 0.0,
     generated_at: datetime | None = None,
+    judge_config: JudgeConfig | None = None,
 ) -> Report:
     """Monta o `Report` final de uma execucao — a peca que hoje nao existe
     em codigo algum nos tres repositorios originais; todo relatorio rico
@@ -118,6 +120,7 @@ def aggregate_report(
         answer_id=answer_id,
         tool_name=tool_name,
         generated_at=generated_at or datetime.now(timezone.utc),
+        judge_config=judge_config,
         total_chunks=len(chunks),
         pct_supported=percentages["pct_supported"],
         pct_unsupported=percentages["pct_unsupported"],
