@@ -8,11 +8,14 @@ from ..common.errors import ExtractionError
 _CHARSET_RE = re.compile(r"charset=([\w-]+)", re.IGNORECASE)
 
 
+def is_pdf_content(content_type: str, url: str) -> bool:
+    return "application/pdf" in content_type.lower() or url.lower().split("?")[0].endswith(".pdf")
+
+
 def convert_to_markdown(content: bytes, content_type: str, url: str) -> str:
     """Converte o conteudo baixado (HTML ou PDF) para Markdown, escolhendo
     o conversor por content-type/extensao (Strategy pattern)."""
-    is_pdf = "application/pdf" in content_type.lower() or url.lower().split("?")[0].endswith(".pdf")
-    if is_pdf:
+    if is_pdf_content(content_type, url):
         return _pdf_to_markdown(content)
     return _html_to_markdown(content, content_type)
 

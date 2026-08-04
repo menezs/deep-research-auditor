@@ -11,7 +11,7 @@ from tqdm import tqdm
 from ..common.errors import DeadReferenceError, ExtractionError, InaccessibleReferenceError
 from ..logging_config import STAGE_COLORS, get_logger
 from ..models import Document, Reference, ReferenceStatus
-from .converters import convert_to_markdown
+from .converters import convert_to_markdown, is_pdf_content
 from .fetcher import FetchResult, HttpFetcher
 from .registry import ReferenceRegistry
 
@@ -125,7 +125,10 @@ def _fetch_and_convert(reference: Reference, fetcher: Fetcher) -> tuple[FetchRes
     try:
         markdown = convert_to_markdown(result.content, result.content_type, reference.raw_url)
     except ExtractionError:
-        if result.fetch_method == "playwright":
+        if result.fetch_method == "playwright" or is_pdf_content(result.content_type, reference.raw_url):
+            # Playwright nao extrai texto de um PDF (abre o visualizador
+            # nativo do Chromium) — nao adianta reter essa mesma falha
+            # por ate 60s.
             raise
         result = fetcher.fetch_via_playwright(reference.raw_url)
         markdown = convert_to_markdown(result.content, result.content_type, reference.raw_url)

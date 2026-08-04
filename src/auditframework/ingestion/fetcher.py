@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
@@ -11,7 +12,29 @@ _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 )
-_HEADERS = {"User-Agent": _USER_AGENT}
+_HEADERS = {
+    "User-Agent": _USER_AGENT,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9,pt-BR;q=0.8,pt;q=0.7",
+}
+
+_REDDIT_HOSTS = {"reddit.com", "www.reddit.com"}
+
+
+def _rewrite_known_hosts(url: str) -> str:
+    """Reddit exige um desafio JS de verificacao em `www.reddit.com` que o
+    Playwright headless nunca resolve (fica em polling ate estourar o
+    timeout de `networkidle`). `old.reddit.com` serve o mesmo conteudo sem
+    esse desafio."""
+    parts = urlsplit(url)
+    if parts.netloc in _REDDIT_HOSTS:
+        parts = parts._replace(netloc="old.reddit.com")
+        return urlunsplit(parts)
+    return url
+
+
+def _is_pdf_url(url: str) -> bool:
+    return urlsplit(url).path.lower().endswith(".pdf")
 
 
 class _Http403Error(Exception):
@@ -46,6 +69,7 @@ class HttpFetcher:
         self.backoff = backoff
 
     def fetch(self, url: str) -> FetchResult:
+        url = _rewrite_known_hosts(url)
         try:
             return self._fetch_once(url)
         except DeadReferenceError:
@@ -97,7 +121,8 @@ class HttpFetcher:
             with sync_playwright() as pw:
                 browser = pw.chromium.launch()
                 page = browser.new_page(extra_http_headers=_HEADERS)
-                page.goto(url, wait_until="networkidle", timeout=60_000)
+                page.goto(url, wait_until="domcontentloaded", timeout=45_000)
+                page.wait_for_timeout(2_000)
                 html = page.content()
                 browser.close()
         except Exception as exc:  # biblioteca externa: superficie de erro ampla
@@ -161,6 +186,11 @@ class HttpFetcher:
         response = scraper.get(url, headers=_HEADERS, timeout=self.timeout)
 
         if response.status_code == 403:
+            if _is_pdf_url(url):
+                # Playwright nao extrai texto de um PDF (abre o visualizador
+                # nativo do Chromium) — tentar so adiaria essa mesma falha
+                # por ate 60s.
+                raise InaccessibleReferenceError(f"HTTP 403 em {url} (PDF, sem fallback via playwright)")
             return self.fetch_via_playwright(url)
         if response.status_code == 404:
             raise DeadReferenceError(f"Referencia nao encontrada (404): {url}")
