@@ -233,6 +233,82 @@ para uso programático (`Pipeline`/`ExtractionStage` aceitam qualquer
 `ReferenceExtractionStrategy` via construtor), sem uma flag de CLI
 dedicada ainda.
 
+Independente do formato de arquivo (`.md`/`.pdf`/`.docx`), o texto é
+primeiro normalizado para markdown (`extraction/loaders.py`) e só depois
+passa pelas mesmas regras de extração — `.md` é lido como está, `.pdf` é
+convertido via `pymupdf4llm`, `.docx` é reconstruído parágrafo a parágrafo
+via `python-docx` (preservando números sobrescritos como marcadores
+`[N]` e estilos `Heading N` como `#`/`##`/...). O corpo da resposta
+(as afirmações a auditar) também deve citar essas referências no mesmo
+formato `[N]`, para que cada `AnswerChunk` seja associado à sua evidência.
+
+`RegexReferenceExtractor.extract` tenta, em ordem, 3 formatos de lista de
+fontes (os dois primeiros combinados, o terceiro só como último recurso):
+
+**1) Marcador `[N]` entre colchetes** (ChatGPT/Gemini, `.md` ou `.pdf`) —
+título e URL na mesma linha ou na seguinte, com um ou mais marcadores
+apontando para a mesma URL:
+
+```markdown
+Corpo da resposta com uma afirmação citando a fonte [1][2].
+
+## Referências
+
+[1] Nome do Artigo ou Página
+https://exemplo.com/artigo
+
+[2] [5] Outro Documento Citado Duas Vezes
+https://exemplo.com/outro-documento
+```
+
+**2) Lista numerada sem colchetes, após o separador `⁂` (Perplexity) ou
+após o cabeçalho da seção** (`.pdf`, tipicamente com a URL sublinhada em
+`<u>...</u>` pelo conversor) — Perplexity ancora pelo `⁂`, Gemini pelo
+cabeçalho da seção de fontes:
+
+```markdown
+Corpo da resposta com uma afirmação citada [1].
+
+⁂
+
+1. <u>https://exemplo.com/artigo</u>
+2. <u>https://exemplo.com/outro-documento</u>
+```
+
+```markdown
+### **Referências citadas**
+
+1. Nome do Artigo, <u>https://exemplo.com/artigo</u>
+2. Outro Documento, <u>https://exemplo.com/outro-documento</u>
+```
+
+**3) Sem marcação nenhuma** (comum em `.docx`, quando o conversor já
+resolve o hyperlink do Word como URL em texto puro) — usado só quando os
+dois formatos acima não encontram nada. Marcador `[N]` é inferido pela
+ORDEM de ocorrência na lista:
+
+```markdown
+Corpo da resposta com uma afirmação citada [1].
+
+⁂
+
+https://exemplo.com/artigo
+https://exemplo.com/outro-documento
+```
+
+```markdown
+## Referências
+
+Nome do Artigo, https://exemplo.com/artigo
+Outro Documento, https://exemplo.com/outro-documento
+```
+
+Em `.docx`, uma citação no corpo do texto normalmente aparece como um
+número sobrescrito (superscript) — o loader converte isso automaticamente
+para `[N]`, então o efeito no texto extraído é o mesmo dos exemplos
+acima. Tabelas dentro do `.docx` também são convertidas (uma célula por
+bloco de texto), preservando marcadores de citação dentro delas.
+
 ## Relatório final
 
 Cada run gera, em `data/runs/<run_id>/`, `report.md` (legível) e
