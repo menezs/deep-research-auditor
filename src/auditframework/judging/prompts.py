@@ -11,6 +11,14 @@ class JudgeOutput(BaseModel):
     verdict: Literal["supported", "unsupported", "contradicted"]
     justification: str
     cited_excerpts: list[str] = Field(default_factory=list)
+    supporting_reference_ids: list[str] = Field(default_factory=list)
+    """Ids que aparecem nos cabecalhos `[referencia=<id> ...]` da EVIDENCE
+    cujo texto de fato sustenta a afirmacao. Lista vazia se nenhuma
+    sustenta."""
+    unsupported_aspects: list[str] = Field(default_factory=list)
+    """Partes especificas da afirmacao que a EVIDENCE NAO cobre — mesmo
+    quando o veredito geral e `supported`. Vazio se a evidencia cobre a
+    afirmacao inteira."""
 
 
 JUDGE_SYSTEM_MESSAGE = (
@@ -51,6 +59,13 @@ def build_judge_prompt(chunk_text: str, curated_context: str) -> str:
         "- Em caso de duvida, prefira unsupported a supported.\n"
         "- Classifique como contradicted somente quando a evidencia conflitar claramente com a afirmacao.\n\n"
         "Em cited_excerpts, inclua trechos LITERAIS copiados da EVIDENCE que "
-        "embasam seu veredito (lista vazia se o veredito for unsupported). "
+        "embasam seu veredito (lista vazia se o veredito for unsupported).\n"
+        "Em supporting_reference_ids, liste os ids que aparecem nos cabecalhos "
+        "`[referencia=<id> ...]` da EVIDENCE cujo texto de fato sustenta a "
+        "afirmacao (lista vazia se nenhuma sustenta).\n"
+        "Em unsupported_aspects, liste as partes ESPECIFICAS da afirmacao que a "
+        "EVIDENCE nao cobre — datas exatas, itens de listas, entidades, numeros — "
+        "MESMO quando o veredito for supported. Vazio so se a evidencia cobrir a "
+        "afirmacao inteira.\n"
         "Escreva a justificativa em portugues, de forma objetiva e curta."
     )

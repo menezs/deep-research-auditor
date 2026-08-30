@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import time
 from dataclasses import dataclass, field
@@ -14,6 +15,7 @@ from .common.errors import ConfigurationError, LLMParseError
 from .config import Settings
 from .extraction.loaders import load_answer
 from .extraction.reference_extractor import (
+    _ASTERISM,
     _REFERENCE_SECTION_HEADING,
     ReferenceExtractionStrategy,
     extract_references,
@@ -41,13 +43,23 @@ logger = get_logger(__name__)
 def _strip_reference_section(text: str) -> str:
     """Remove a secao final de lista de fontes antes do chunking da
     resposta — sem isso, `AnswerChunker` trataria cada entrada da lista
-    de referencias (que tambem comeca com um marcador `[N]`) como se
-    fosse uma alegacao a ser julgada, desperdicando chamadas de LLM e
-    poluindo o relatorio com "chunks" que sao apenas citacoes."""
-    match = _REFERENCE_SECTION_HEADING.search(text)
-    if match is None:
+    de referencias como se fosse uma alegacao a ser julgada,
+    desperdicando chamadas de LLM e poluindo o relatorio com "chunks" que
+    sao apenas citacoes (visto no Perplexity, que ancora a lista so pelo
+    separador `⁂`, sem cabecalho).
+
+    Corta a partir da ultima ancora encontrada — cabecalho de secao
+    (`Referencias`/`References`/...) ou o separador `⁂` do Perplexity."""
+    cut_points: list[int] = []
+    heading_match = _REFERENCE_SECTION_HEADING.search(text)
+    if heading_match is not None:
+        cut_points.append(heading_match.start())
+    asterism_pos = text.rfind(_ASTERISM)
+    if asterism_pos != -1:
+        cut_points.append(asterism_pos)
+    if not cut_points:
         return text
-    return text[: match.start()].rstrip()
+    return text[: max(cut_points)].rstrip()
 
 
 class PipelineStage(Protocol):
@@ -437,6 +449,20 @@ class Pipeline:
         return ctx
 
 
+_SMALL_MODEL_RE = re.compile(r"\b(?:[0-7](?:\.\d)?|e[0-7])\s?b\b", re.IGNORECASE)
+
+
+def _looks_like_small_model(model: str) -> bool:
+    """Heuristica grosseira pelo nome: sugere um juiz com menos de ~8B de
+    parametros (ex: `gemma-4-e4b`, `qwen2.5-3b`, `phi-3-mini`,
+    `llama-3.2-1b`), pequeno demais para julgar com precisao contextos de
+    varios milhares de tokens."""
+    lowered = model.lower()
+    if any(tag in lowered for tag in ("mini", "small", "tiny")):
+        return True
+    return bool(_SMALL_MODEL_RE.search(lowered))
+
+
 def build_pipeline(settings: Settings) -> Pipeline:
     """Monta o pipeline real, resolvendo cada dependencia (Embedder,
     Reranker, LLMClient) a partir do `Settings` (Factory pattern) — os
@@ -454,6 +480,14 @@ def build_pipeline(settings: Settings) -> Pipeline:
             "US$ 0,00 para o juiz LLM (apenas 'anthropic' com modelo tabelado e execucao local sao "
             "contabilizados).",
             settings.llm_provider,
+            settings.llm_model,
+        )
+
+    if _looks_like_small_model(settings.llm_model):
+        logger.warning(
+            "Juiz LLM %r parece ser um modelo pequeno (< ~8B). Contextos longos "
+            "de evidencia tendem a gerar vereditos grosseiros/otimistas — "
+            "considere um modelo maior para o estagio de julgamento.",
             settings.llm_model,
         )
 

@@ -80,6 +80,7 @@ class ReportRenderer:
             self._render_reference_ranking(),
             self._render_dead_and_inaccessible(),
             self._render_examples() if self._results else None,
+            self._render_potentially_unsourced(),
             self._render_skipped_chunks(),
         ]
         parts = [self._render_header()]
@@ -138,9 +139,13 @@ class ReportRenderer:
             total_chunks += report.count_skipped
             total_pct += pct_skipped
         table += f"\n| **TOTAL** | {total_chunks} | {total_pct:.1f}% |"
-        return ReportSection(
-            "Distribuição de Vereditos", "| Veredito | Chunks | Percentual |\n|---|---|---|\n" + table
-        )
+        body = "| Veredito | Chunks | Percentual |\n|---|---|---|\n" + table
+        if report.count_partially_supported:
+            body += (
+                f"\n\n> {report.count_partially_supported} de {report.count_supported} SUPPORTED têm "
+                "aspectos da afirmação não cobertos pela evidência (\"parcialmente suportada\") — ver Exemplos."
+            )
+        return ReportSection("Distribuição de Vereditos", body)
 
     def _render_verification(self) -> ReportSection | None:
         """Efeito da cascata de verificação aplicada aos vereditos
@@ -195,21 +200,27 @@ class ReportRenderer:
         return ReportSection("Custo e Uso de Tokens", body)
 
     def _render_reference_ranking(self) -> ReportSection:
-        stats = self.report.reference_stats
+        report = self.report
+        stats = report.reference_stats
         if not stats:
             return ReportSection("Análise por Referência", "Nenhuma referência citada nos chunks avaliados.")
         total = len(stats)
         uncited = sum(1 for s in stats if s.times_cited == 0)
         pct_uncited = (uncited / total) * 100.0
-        summary = (
-            f"Referências sem nenhuma citação: {uncited}/{total} ({pct_uncited:.1f}%)\n\n"
-        )
+        summary = f"Referências sem nenhuma citação: {uncited}/{total} ({pct_uncited:.1f}%)\n"
+        if report.uncredited_reference_count:
+            summary += (
+                f"Referências citadas mas nunca creditadas como fonte de suporte por nenhum veredito: "
+                f"{report.uncredited_reference_count} (coluna **Suporte** = 0/N).\n"
+            )
+        summary += "\n"
         header = (
-            "| Referência | Status | Citações | SUPPORTED | UNSUPPORTED | CONTRADICTED |\n"
-            "|---|---|---|---|---|---|\n"
+            "| Referência | Status | Citações | Suporte | SUPPORTED | UNSUPPORTED | CONTRADICTED |\n"
+            "|---|---|---|---|---|---|---|\n"
         )
         rows = "\n".join(
             f"| [{self._reference_label(s.reference_id, s.url)}]({s.url}) | {s.status.value} | {s.times_cited} | "
+            f"{s.supporting_citations}/{s.times_cited} | "
             f"{s.supported_count} | {s.unsupported_count} | {s.contradicted_count} |"
             for s in stats
         )
@@ -220,6 +231,10 @@ class ReportRenderer:
         if reference is not None and reference.citation_markers:
             return " ".join(reference.citation_markers)
         return fallback_url
+
+    def _markers_for(self, reference_ids: list[str]) -> str:
+        labels = [self._reference_label(rid, rid) for rid in reference_ids]
+        return " ".join(labels) if labels else "(nenhuma)"
 
     def _render_dead_and_inaccessible(self) -> ReportSection | None:
         report = self.report
@@ -236,12 +251,43 @@ class ReportRenderer:
             )
         return ReportSection("Referências Mortas e Inacessíveis", "\n".join(lines))
 
+    _SKIP_REASON_LABELS = {
+        "sem_citacao": "não citam nenhuma referência",
+        "ref_sem_conteudo": "citam referência não baixada/inacessível",
+        "outro": "outro motivo",
+    }
+
     def _render_skipped_chunks(self) -> ReportSection | None:
-        skipped = self.report.skipped_chunks
+        report = self.report
+        skipped = report.skipped_chunks
         if not skipped:
             return None
-        body = "\n".join(f"- `{s.answer_chunk_id}` — {s.reason}" for s in skipped)
-        return ReportSection("Chunks Não Auditados", body)
+        lines: list[str] = []
+        if report.skipped_reason_counts:
+            summary = "; ".join(
+                f"{count} {self._SKIP_REASON_LABELS.get(key, key)}"
+                for key, count in sorted(report.skipped_reason_counts.items())
+            )
+            lines.append(f"Motivos: {summary}.")
+            lines.append("")
+        lines.append("\n".join(f"- `{s.answer_chunk_id}` — {s.reason}" for s in skipped))
+        return ReportSection("Chunks Não Auditados", "\n".join(lines))
+
+    def _render_potentially_unsourced(self) -> ReportSection | None:
+        chunks = self.report.potentially_unsourced_chunks
+        if not chunks:
+            return None
+        lines = [
+            "Chunks com várias frases em que só a última está ancorada por uma citação — "
+            "as frases anteriores podem carregar afirmações sem fonte associada:",
+            "",
+        ]
+        for c in chunks:
+            lines.append(
+                f"- `{c.answer_chunk_id}` — {c.sentence_count} frases, cita {self._markers_for(c.cited_reference_ids)}"
+            )
+            lines.append(f"  - {c.excerpt}")
+        return ReportSection("Afirmações Possivelmente sem Fonte", "\n".join(lines))
 
     def _render_examples(self) -> ReportSection:
         by_verdict: dict[AuditVerdict, list[AuditResult]] = {v: [] for v in AuditVerdict}
@@ -273,6 +319,12 @@ class ReportRenderer:
             f"  - Trecho: {chunk_excerpt}",
             f"  - Justificativa: {_excerpt(result.justification)}",
         ]
+        if result.supporting_reference_ids:
+            lines.append(f"  - Suporte veio de: {self._markers_for(result.supporting_reference_ids)}")
+        if result.cited_excerpts:
+            lines.append(f"  - Evidência: “{_excerpt(result.cited_excerpts[0])}”")
+        if result.unsupported_aspects:
+            lines.append(f"  - Não coberto pela evidência: {'; '.join(a for a in result.unsupported_aspects[:3])}")
         verification = self._verification_note(result)
         if verification:
             lines.append(f"  - Verificação: {verification}")
@@ -288,7 +340,12 @@ class ReportRenderer:
             if result.corroborated_by_other_reference:
                 note += f"; corroborado por outra referência ({', '.join(result.corroborated_by_other_reference)})"
         else:
+            baseline = next(
+                (s.note for s in result.verification_trail if s.stage == "baseline"), ""
+            )
             note = f"reclassificado para {result.verdict.value.upper()} na etapa `{result.verification_stage}`"
+            if baseline:
+                note += f' (baseline dizia: "{_excerpt(baseline, 140)}")'
         return f"{note} — cascata: {path}"
 
 

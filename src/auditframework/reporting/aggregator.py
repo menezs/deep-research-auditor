@@ -8,6 +8,7 @@ from ..models import (
     AuditResult,
     AuditVerdict,
     JudgeConfig,
+    PotentiallyUnsourcedChunk,
     Reference,
     ReferenceStats,
     ReferenceStatus,
@@ -17,6 +18,8 @@ from ..models import (
 )
 from ..common.pricing import is_cost_tracked
 from .cost_tracker import summarize_cost
+
+_MULTI_CLAIM_SENTENCE_THRESHOLD = 3
 
 _VERDICT_PCT_FIELDS: dict[AuditVerdict, str] = {
     AuditVerdict.SUPPORTED: "pct_supported",
@@ -88,6 +91,7 @@ def build_reference_stats(
 
     times_cited: dict[str, int] = defaultdict(int)
     verdict_counts: dict[str, Counter] = defaultdict(Counter)
+    supporting_citations: dict[str, int] = defaultdict(int)
 
     for chunk in chunks:
         result = result_by_chunk.get(chunk.id)
@@ -95,6 +99,8 @@ def build_reference_stats(
             times_cited[ref_id] += 1
             if result is not None:
                 verdict_counts[ref_id][result.verdict] += 1
+                if ref_id in result.supporting_reference_ids:
+                    supporting_citations[ref_id] += 1
 
     stats = [
         ReferenceStats(
@@ -104,12 +110,45 @@ def build_reference_stats(
             supported_count=verdict_counts[ref.id].get(AuditVerdict.SUPPORTED, 0),
             unsupported_count=verdict_counts[ref.id].get(AuditVerdict.UNSUPPORTED, 0),
             contradicted_count=verdict_counts[ref.id].get(AuditVerdict.CONTRADICTED, 0),
+            supporting_citations=supporting_citations.get(ref.id, 0),
             status=ref.status,
         )
         for ref in references
     ]
     stats.sort(key=lambda s: s.times_cited, reverse=True)
     return stats
+
+
+def _multi_claim_chunks(chunks: list[AnswerChunk]) -> list[PotentiallyUnsourcedChunk]:
+    out: list[PotentiallyUnsourcedChunk] = []
+    for chunk in chunks:
+        if not chunk.cited_reference_ids:
+            continue
+        if chunk.sentence_count < _MULTI_CLAIM_SENTENCE_THRESHOLD:
+            continue
+        excerpt = " ".join(chunk.text.split())
+        out.append(
+            PotentiallyUnsourcedChunk(
+                answer_chunk_id=chunk.id,
+                sentence_count=chunk.sentence_count,
+                cited_reference_ids=list(chunk.cited_reference_ids),
+                excerpt=excerpt if len(excerpt) <= 300 else excerpt[:299].rstrip() + "…",
+            )
+        )
+    return out
+
+
+def _skipped_reason_counts(skipped: list[SkippedChunk]) -> dict[str, int]:
+    counts: Counter[str] = Counter()
+    for chunk in skipped:
+        reason = chunk.reason.lower()
+        if "nao cita nenhuma referencia" in reason or "não cita nenhuma referência" in reason:
+            counts["sem_citacao"] += 1
+        elif "conteudo indexado" in reason or "conteúdo indexado" in reason:
+            counts["ref_sem_conteudo"] += 1
+        else:
+            counts["outro"] += 1
+    return dict(counts)
 
 
 def aggregate_report(
@@ -139,6 +178,12 @@ def aggregate_report(
         is_cost_tracked(judge_config.provider, judge_config.model) if judge_config is not None else True
     )
 
+    reference_stats = build_reference_stats(chunks, references, results)
+    partially_supported = sum(
+        1 for r in results if r.verdict == AuditVerdict.SUPPORTED and r.unsupported_aspects
+    )
+    uncredited_refs = sum(1 for s in reference_stats if s.times_cited > 0 and s.supporting_citations == 0)
+
     return Report(
         run_id=run_id,
         answer_id=answer_id,
@@ -154,6 +199,9 @@ def aggregate_report(
         count_unsupported=counts["count_unsupported"],
         count_contradicted=counts["count_contradicted"],
         count_skipped=len(skipped),
+        count_partially_supported=partially_supported,
+        skipped_reason_counts=_skipped_reason_counts(skipped),
+        uncredited_reference_count=uncredited_refs,
         verification_ran=verification["verification_ran"],
         count_unsupported_confirmed=verification["count_unsupported_confirmed"],
         count_reclassified_by_verification=verification["count_reclassified_by_verification"],
@@ -162,7 +210,8 @@ def aggregate_report(
         dead_references=[r for r in references if r.status == ReferenceStatus.DEAD],
         inaccessible_references=[r for r in references if r.status == ReferenceStatus.INACCESSIBLE],
         skipped_chunks=skipped,
-        reference_stats=build_reference_stats(chunks, references, results),
+        reference_stats=reference_stats,
+        potentially_unsourced_chunks=_multi_claim_chunks(chunks),
         total_cost_usd=cost.total_cost_usd,
         total_tokens=cost.total_tokens,
         cost_tracked=cost_tracked,

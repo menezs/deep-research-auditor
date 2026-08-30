@@ -169,3 +169,27 @@ class TestStripReferenceSection:
     def test_text_without_a_reference_heading_is_returned_unchanged(self):
         text = "Um paragrafo qualquer sem lista de fontes."
         assert _strip_reference_section(text) == text
+
+
+class TestStripAsterismList:
+    def test_cuts_at_the_perplexity_asterism_when_there_is_no_heading(self):
+        text = "Corpo [1].\n\n⁂\n\n1. <u>https://a.com</u>\n2. <u>https://b.com</u>"
+        assert _strip_reference_section(text) == "Corpo [1]."
+
+    def test_uses_the_later_anchor_when_both_heading_and_asterism_exist(self):
+        text = "## Referências no meio do texto\n\nCorpo [1].\n\n⁂\n\n1. https://a.com"
+        assert _strip_reference_section(text) == "## Referências no meio do texto\n\nCorpo [1]."
+
+
+class TestSmallModelHeuristic:
+    def test_flags_small_models(self):
+        from auditframework.pipeline import _looks_like_small_model
+
+        for m in ("google/gemma-4-e4b", "qwen2.5-3b", "phi-3-mini", "llama-3.2-1b", "mistral-7b"):
+            assert _looks_like_small_model(m) is True, m
+
+    def test_does_not_flag_large_models(self):
+        from auditframework.pipeline import _looks_like_small_model
+
+        for m in ("openai/gpt-oss-20b", "llama-3.1-8b", "claude-sonnet-5", "qwen2.5-32b"):
+            assert _looks_like_small_model(m) is False, m

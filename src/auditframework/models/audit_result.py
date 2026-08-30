@@ -32,6 +32,13 @@ class AuditResult(BaseModel):
     verdict: AuditVerdict
     justification: str
     cited_excerpts: list[str] = Field(default_factory=list)
+    supporting_reference_ids: list[str] = Field(default_factory=list)
+    """Subconjunto de `AnswerChunk.cited_reference_ids` cujo conteudo de
+    fato sustenta a afirmacao, segundo o juiz. Uma referencia citada que
+    nunca aparece aqui foi citada mas nao contribuiu com evidencia."""
+    unsupported_aspects: list[str] = Field(default_factory=list)
+    """Partes da afirmacao nao cobertas pela evidencia — preenchido mesmo
+    sob veredito `supported` (sinal de "parcialmente suportada")."""
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cost_usd: float = 0.0

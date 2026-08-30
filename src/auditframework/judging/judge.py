@@ -42,11 +42,17 @@ class Verifier:
             schema=JudgeOutput,
         )
 
+        # o juiz pode devolver ids fora do contexto — mantem so os reais
+        available_ref_ids = {p.reference_id for p in curated.passages}
+        supporting = [r for r in output.supporting_reference_ids if r in available_ref_ids]
+
         return AuditResult(
             answer_chunk_id=chunk.id,
             verdict=AuditVerdict(output.verdict),
             justification=output.justification,
             cited_excerpts=output.cited_excerpts,
+            supporting_reference_ids=supporting,
+            unsupported_aspects=output.unsupported_aspects,
             prompt_tokens=usage.prompt_tokens,
             completion_tokens=usage.completion_tokens,
             cost_usd=usage.cost_usd,

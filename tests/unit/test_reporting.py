@@ -482,3 +482,78 @@ class TestVerificationSection:
         assert "## 3. Verificação de UNSUPPORTED" in markdown
         assert "confirmados" in markdown and "reclassificados" in markdown
         assert "provável erro de citação" in markdown
+
+
+class TestCitationLevelAndUnsourced:
+    def test_supporting_citations_and_uncredited_reference_count(self):
+        chunks = [_chunk("c1", ["r1", "r2"]), _chunk("c2", ["r2"])]
+        results = [
+            _result("c1", AuditVerdict.SUPPORTED, supporting_reference_ids=["r1"]),   # r2 citada mas nao creditada
+            _result("c2", AuditVerdict.SUPPORTED, supporting_reference_ids=["r2"]),
+        ]
+        report = aggregate_report(
+            run_id="run-1", answer_id="a1", tool_name="ChatGPT",
+            chunks=chunks, references=[_reference("r1"), _reference("r2")], results=results,
+        )
+        stats = {s.reference_id: s for s in report.reference_stats}
+        assert stats["r1"].times_cited == 1 and stats["r1"].supporting_citations == 1
+        assert stats["r2"].times_cited == 2 and stats["r2"].supporting_citations == 1
+        assert report.uncredited_reference_count == 0  # r1 e r2 ambas creditadas ao menos 1x
+
+        markdown = render_markdown(report)
+        assert "| Referência | Status | Citações | Suporte |" in markdown
+
+    def test_reference_cited_but_never_supporting_is_flagged(self):
+        chunks = [_chunk("c1", ["r1", "r2"])]
+        results = [_result("c1", AuditVerdict.SUPPORTED, supporting_reference_ids=["r1"])]
+        report = aggregate_report(
+            run_id="run-1", answer_id="a1", tool_name="ChatGPT",
+            chunks=chunks, references=[_reference("r1"), _reference("r2")], results=results,
+        )
+        assert report.uncredited_reference_count == 1  # r2
+        assert "nunca creditadas como fonte de suporte" in render_markdown(report)
+
+    def test_partially_supported_count_and_note(self):
+        chunks = [_chunk("c1", ["r1"]), _chunk("c2", ["r1"])]
+        results = [
+            _result("c1", AuditVerdict.SUPPORTED, unsupported_aspects=["a data exata não consta"]),
+            _result("c2", AuditVerdict.SUPPORTED),
+        ]
+        report = aggregate_report(
+            run_id="run-1", answer_id="a1", tool_name="ChatGPT",
+            chunks=chunks, references=[_reference("r1")], results=results,
+        )
+        assert report.count_partially_supported == 1
+        markdown = render_markdown(report, chunks=chunks, results=results)
+        assert "parcialmente suportada" in markdown
+        assert "Não coberto pela evidência: a data exata não consta" in markdown
+
+    def test_potentially_unsourced_section_lists_multi_sentence_chunks(self):
+        long_chunk = AnswerChunk(
+            id="c1", answer_id="a1", position=0,
+            text="Afirmação um. Afirmação dois. Afirmação três citada.",
+            cited_reference_ids=["r1"], sentence_count=3,
+        )
+        report = aggregate_report(
+            run_id="run-1", answer_id="a1", tool_name="ChatGPT",
+            chunks=[long_chunk], references=[_reference("r1")],
+            results=[_result("c1", AuditVerdict.SUPPORTED)],
+        )
+        assert [c.answer_chunk_id for c in report.potentially_unsourced_chunks] == ["c1"]
+        markdown = render_markdown(report)
+        assert "## " in markdown and "Afirmações Possivelmente sem Fonte" in markdown
+        assert "3 frases" in markdown
+
+    def test_skipped_reasons_are_grouped(self):
+        chunks = [_chunk("c1", []), _chunk("c2", ["r1"])]
+        skipped = [
+            SkippedChunk(answer_chunk_id="c1", reason="Chunk nao cita nenhuma referencia."),
+            SkippedChunk(answer_chunk_id="c2", reason="Referencia(s) citada(s) ['r1'] nao possui(em) conteudo indexado."),
+        ]
+        report = aggregate_report(
+            run_id="run-1", answer_id="a1", tool_name="ChatGPT",
+            chunks=chunks, references=[_reference("r1")], results=[], skipped=skipped,
+        )
+        assert report.skipped_reason_counts == {"sem_citacao": 1, "ref_sem_conteudo": 1}
+        markdown = render_markdown(report)
+        assert "Motivos:" in markdown and "não citam nenhuma referência" in markdown

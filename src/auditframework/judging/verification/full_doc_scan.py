@@ -64,6 +64,7 @@ class FullDocumentScanStage:
                     verdict=AuditVerdict.SUPPORTED,
                     justification=assessment.justification,
                     cited_excerpts=assessment.cited_excerpts,
+                    supporting_reference_ids=[rid],
                     note=f"suporte encontrado na varredura completa de {rid}",
                     prompt_tokens=pt,
                     completion_tokens=ct,

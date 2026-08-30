@@ -12,6 +12,11 @@ class AnswerChunk(BaseModel):
     position: int
     text: str
     cited_reference_ids: list[str] = Field(default_factory=list)
+    sentence_count: int = 1
+    """Frases no trecho. `> 1` indica que so a ultima frase esta ancorada
+    pela citacao — as frases anteriores podem carregar afirmacoes sem
+    fonte associada (ver secao "Afirmacoes possivelmente sem fonte" no
+    relatorio)."""
 
 
 class ReferenceChunk(BaseModel):

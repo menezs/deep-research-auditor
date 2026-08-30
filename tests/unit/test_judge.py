@@ -101,3 +101,18 @@ def test_unparseable_llm_output_propagates_instead_of_becoming_a_verdict():
 
     with pytest.raises(LLMParseError, match="blah"):
         verifier.verify(_chunk(), _curated())
+
+
+def test_supporting_reference_ids_are_filtered_to_the_retrieved_passages():
+    output = JudgeOutput(
+        verdict="supported",
+        justification="ok",
+        supporting_reference_ids=["refA", "ref-inventada"],  # so refA existe no contexto
+        unsupported_aspects=["a data exata não aparece"],
+    )
+    verifier = Verifier(FakeLLMClient(response=output))
+
+    result = verifier.verify(_chunk(), _curated())
+
+    assert result.supporting_reference_ids == ["refA"]
+    assert result.unsupported_aspects == ["a data exata não aparece"]

@@ -15,7 +15,22 @@ class ReferenceStats(BaseModel):
     supported_count: int = 0
     unsupported_count: int = 0
     contradicted_count: int = 0
+    supporting_citations: int = 0
+    """Quantos dos chunks que citam esta referencia realmente tiveram nela
+    evidencia de suporte (`AuditResult.supporting_reference_ids`). Se e
+    `< times_cited`, a referencia foi citada mais vezes do que efetivamente
+    sustentou algo."""
     status: ReferenceStatus
+
+
+class PotentiallyUnsourcedChunk(BaseModel):
+    """Chunk com varias frases em que so a ultima esta ancorada por uma
+    citacao — as frases anteriores podem carregar afirmacoes sem fonte."""
+
+    answer_chunk_id: str
+    sentence_count: int
+    cited_reference_ids: list[str] = Field(default_factory=list)
+    excerpt: str
 
 
 class ToolStats(BaseModel):
@@ -58,6 +73,11 @@ class Report(BaseModel):
     count_unsupported: int = 0
     count_contradicted: int = 0
     count_skipped: int = 0
+    count_partially_supported: int = 0
+    """SUPPORTED com aspectos da afirmacao nao cobertos pela evidencia
+    (`AuditResult.unsupported_aspects` nao vazio)."""
+    skipped_reason_counts: dict[str, int] = Field(default_factory=dict)
+    """Chunks SKIPPED agrupados por motivo (`sem_citacao` / `ref_sem_conteudo`)."""
 
     # --- Cascata de verificacao de vereditos UNSUPPORTED ---
     verification_ran: bool = False
@@ -73,10 +93,15 @@ class Report(BaseModel):
     """UNSUPPORTED corroborados por outra referencia baixada (provavel erro
     de citacao)."""
 
+    uncredited_reference_count: int = 0
+    """Referencias citadas por pelo menos um chunk, mas que nunca
+    apareceram como fonte de suporte em nenhum veredito."""
+
     dead_references: list[Reference] = Field(default_factory=list)
     inaccessible_references: list[Reference] = Field(default_factory=list)
     skipped_chunks: list[SkippedChunk] = Field(default_factory=list)
     reference_stats: list[ReferenceStats] = Field(default_factory=list)
+    potentially_unsourced_chunks: list[PotentiallyUnsourcedChunk] = Field(default_factory=list)
 
     total_cost_usd: float = 0.0
     total_tokens: int = 0

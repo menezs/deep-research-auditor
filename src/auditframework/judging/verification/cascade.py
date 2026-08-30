@@ -37,6 +37,8 @@ class StageOutcome:
     justification: str
     note: str
     cited_excerpts: list[str] = field(default_factory=list)
+    supporting_reference_ids: list[str] = field(default_factory=list)
+    unsupported_aspects: list[str] = field(default_factory=list)
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cost_usd: float = 0.0
@@ -100,6 +102,8 @@ class VerificationCascade:
                 result.verdict = outcome.verdict
                 result.justification = outcome.justification
                 result.cited_excerpts = outcome.cited_excerpts or result.cited_excerpts
+                result.supporting_reference_ids = outcome.supporting_reference_ids
+                result.unsupported_aspects = outcome.unsupported_aspects
                 result.verification_stage = stage.name
             elif stage.name == self._CONFIRMED_BY and not outcome.inconclusive:
                 result.unsupported_confirmed = True

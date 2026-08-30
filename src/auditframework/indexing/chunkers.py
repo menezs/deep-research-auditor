@@ -24,6 +24,20 @@ _UNICODE_SUPERSCRIPT_RE = re.compile("[" + "".join(_UNICODE_SUPERSCRIPT_MAP) + "
 
 _HEADER_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 
+# Fronteira de frase: `.`/`!`/`?` seguido de espaco + maiuscula (ASCII ou
+# Latin-1 acentuada) ou fim do texto. Evita contar `.` de numeros
+# (`1.338`, `v2.5`) como fim de frase.
+_SENTENCE_BOUNDARY_RE = re.compile(r'[.!?]+(?:\s+(?=[A-ZÀ-Þ"\'(])|\s*$)')
+
+
+def _count_sentences(text: str) -> int:
+    """Estimativa de frases num trecho — usada para sinalizar chunks em
+    que so a ultima frase esta ancorada por uma citacao."""
+    boundaries = len(_SENTENCE_BOUNDARY_RE.findall(text))
+    if not text.rstrip().endswith((".", "!", "?")):
+        boundaries += 1
+    return max(1, boundaries)
+
 
 def _normalize_citation_markers(text: str) -> str:
     """Converte `<sup>2</sup>`, `<sub>2</sub>` e superscripts unicode
@@ -89,7 +103,14 @@ class AnswerChunker:
             if not stripped:
                 return []
             return [
-                AnswerChunk(id=f"{answer_id}-0", answer_id=answer_id, position=0, text=stripped, cited_reference_ids=[])
+                AnswerChunk(
+                    id=f"{answer_id}-0",
+                    answer_id=answer_id,
+                    position=0,
+                    text=stripped,
+                    cited_reference_ids=[],
+                    sentence_count=_count_sentences(stripped),
+                )
             ]
 
         chunks: list[AnswerChunk] = []
@@ -105,6 +126,7 @@ class AnswerChunker:
                         position=position,
                         text=chunk_text,
                         cited_reference_ids=_resolve_markers(markers, marker_to_ref_id),
+                        sentence_count=_count_sentences(chunk_text),
                     )
                 )
                 position += 1
@@ -119,6 +141,7 @@ class AnswerChunker:
                     position=position,
                     text=trailing,
                     cited_reference_ids=[],
+                    sentence_count=_count_sentences(trailing),
                 )
             )
         return chunks

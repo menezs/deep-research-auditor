@@ -42,6 +42,7 @@ def ingest_references(
     chamada e os que ja existiam no registry de uma execucao anterior —
     para que uma retomada (`audit resume`) possa reindexar sem precisar
     rebaixar nada."""
+    fetcher_was_provided = fetcher is not None
     fetcher = fetcher or HttpFetcher()
     updated: dict[str, Reference] = {ref.id: ref for ref in references}
     documents: list[Document] = []
@@ -78,6 +79,27 @@ def ingest_references(
             if document is not None and markdown is not None:
                 registry.save_document(document, markdown)
                 documents.append(document)
+
+    # Segunda passada, serial e com timeout generoso, so para as
+    # referencias que ficaram INACCESSIBLE (tipicamente timeout/rate-limit
+    # transitorio). DEAD (404) e ERROR nao sao retentados aqui.
+    inaccessible = [r for r in updated.values() if r.status == ReferenceStatus.INACCESSIBLE]
+    if inaccessible:
+        retry_fetcher = fetcher if fetcher_was_provided else HttpFetcher(timeout=(15, 180), max_retries=3, backoff=3.0)
+        logger.info("Retentando %d referencia(s) inacessivel(is) com timeout maior", len(inaccessible))
+        for ref in tqdm(
+            inaccessible,
+            desc="Retentando inacessíveis",
+            unit="ref",
+            colour=STAGE_COLORS["ingestion"],
+        ):
+            new_ref, document, markdown = _ingest_one(ref, retry_fetcher)
+            updated[new_ref.id] = new_ref
+            if document is not None and markdown is not None:
+                registry.save_document(document, markdown)
+                documents.append(document)
+            if new_ref.status == ReferenceStatus.DOWNLOADED:
+                logger.info("Referencia %s recuperada na segunda tentativa", ref.raw_url)
 
     final_references = list(updated.values())
     registry.save_references(final_references)

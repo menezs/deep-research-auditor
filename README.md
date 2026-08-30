@@ -74,8 +74,12 @@ Principais variáveis:
 | `LLM_MODEL`, `LLM_BASE_URL` | — | modelo e endpoint do juiz (e da extração via LLM) |
 | `EMBEDDING_MODEL` | `BAAI/bge-m3` | modelo de embeddings |
 | `RERANKER_MODEL` | `BAAI/bge-reranker-v2-m3` | cross-encoder de reranking |
-| `RETRIEVAL_TOP_K` / `RERANK_TOP_K` | `50` / `20` | candidatos recuperados / reordenados |
+| `RETRIEVAL_TOP_K` / `RERANK_TOP_K` | `30` / `10` | candidatos recuperados / reordenados (o rerank define quantas passagens o juiz vê) |
 | `VERIFICATION_*` | — | parâmetros da cascata de UNSUPPORTED (ver abaixo) |
+
+Um juiz pequeno demais (nome sugere < ~8B, ex: `gemma-4-e4b`) para contextos
+longos de evidência gera vereditos grosseiros — o `audit run` emite um aviso
+nesse caso.
 
 ## Uso
 
@@ -106,24 +110,58 @@ de fontes (Perplexity/Gemini), e lista sem marcação nenhuma (marcador inferido
 pela ordem de ocorrência, comum em `.docx`). Para respostas fora desses
 formatos existe `LLMReferenceExtractor` (uso programático).
 
-## Recuperação de contexto
+## Recuperação de contexto e julgamento inicial
 
-A recuperação é **sempre escopada às referências que o chunk cita**. Se o chunk
-não cita nenhuma referência, ou a referência citada não pôde ser baixada
-(morta/inacessível), o chunk **não é julgado**: vira `SKIPPED` no relatório com
-justificativa e a auditoria continua. A busca no corpus inteiro acontece apenas
-na Etapa C da verificação, abaixo.
+Antes de qualquer verificação, cada `AnswerChunk` passa pelo **julgamento
+inicial** (o *baseline*), em duas fases:
+
+1. **Recuperação (busca vetorial + rerank), sem LLM.** A busca é **sempre
+   escopada às referências que o chunk cita** — o texto do chunk é embutido
+   (`bge-m3`) e a busca no FAISS é restrita aos trechos das referências citadas.
+   O FAISS devolve `RETRIEVAL_TOP_K` (30) candidatos; o cross-encoder
+   (`bge-reranker-v2-m3`) reordena e mantém os `RERANK_TOP_K` (10) melhores.
+   Esses 10 trechos, ordenados por score e com cabeçalho de proveniência
+   (`[referencia=… score=…]`), formam o `CuratedDocument` — o contexto que o
+   juiz vê. Se o chunk não cita nenhuma referência, ou a referência citada não
+   pôde ser baixada (morta/inacessível), não há o que recuperar: o chunk **não
+   é julgado**, vira `SKIPPED` no relatório e a auditoria continua.
+2. **Julgamento (1 chamada de LLM por chunk), serial.** O juiz recebe o texto do
+   chunk + o `CuratedDocument` e devolve o veredito (`SUPPORTED` /
+   `UNSUPPORTED` / `CONTRADICTED`), a justificativa, os trechos literais que o
+   embasam, `supporting_reference_ids` e `unsupported_aspects`. Uma saída não
+   parseável não vira veredito — o chunk fica pendente para a próxima
+   `audit resume`.
+
+`SUPPORTED` e `CONTRADICTED` do baseline são finais. Um **`UNSUPPORTED` não é**
+— ele entra na cascata abaixo. A busca no corpus inteiro (ignorando a citação)
+acontece só na Etapa C.
 
 ## Auditoria de vereditos UNSUPPORTED
 
-Um `UNSUPPORTED` do juiz inicial **não é o veredito final**. Todo chunk marcado
-`UNSUPPORTED` passa por uma cascata de 3 etapas (`judging/verification/`),
-**sempre ativa**, que **para na primeira etapa que muda o veredito**.
+Um `UNSUPPORTED` do julgamento inicial **não é o veredito final**. Todo chunk
+marcado `UNSUPPORTED` passa por uma cascata de 3 etapas
+(`judging/verification/`), **sempre ativa**, que **para na primeira etapa que
+muda o veredito**.
 
-**A — Expansão de contexto.** Refaz a recuperação na referência citada com um
-`rerank_top_k` maior e anexa os trechos vizinhos de cada acerto, remontando o
-contexto em ordem de documento. Re-julga. Resolve o caso em que o fato ficou na
-fronteira de um chunk de 512 tokens ou logo fora da janela de rerank.
+**A — Expansão de contexto (*small-to-big* na referência citada).** O baseline
+julgou o chunk vendo só os 10 fragmentos de ~512 tokens mais bem pontuados,
+isolados uns dos outros. Um fato pode ter escapado disso: ficou partido na
+fronteira de dois fragmentos, ou ficou na posição 11–20 do ranking, ou só faz
+sentido junto da frase anterior/seguinte. A Etapa A refaz a recuperação **na
+mesma referência citada** corrigindo esses três pontos:
+
+- amplia a janela de rerank de `RERANK_TOP_K` (10) para
+  `VERIFICATION_RERANK_TOP_K` (20) — o dobro de trechos candidatos;
+- garante que todo trecho da referência citada entre como candidato da busca
+  (não só os 30 do `RETRIEVAL_TOP_K`);
+- expande cada trecho sobrevivente com os `VERIFICATION_NEIGHBOR_WINDOW` (1)
+  trechos imediatamente vizinhos no mesmo documento (o *big* do *small-to-big*);
+- remonta o contexto em **ordem de documento** (não por score), para o juiz ler
+  a passagem como texto corrido.
+
+Com esse contexto ampliado e contínuo, o **mesmo juiz** re-julga o chunk. Se
+achar suporte → `SUPPORTED` e a cascata para; se contradição → `CONTRADICTED`;
+se continuar sem evidência → segue para a Etapa B.
 
 **B — Varredura do documento citado inteiro.** Sem recuperação: lê o markdown
 completo de cada referência citada, fatia em janelas grandes e pergunta ao
@@ -139,12 +177,15 @@ referência sustenta (`corroborated_by_other_reference`) ou contradiz
 (`contradicted_by_other_reference`) o claim — sinal de citação trocada.
 
 O `AuditResult` final carrega `verification_stage` (etapa que produziu o
-veredito), `unsupported_confirmed`, as anotações de corroboração e
-`verification_trail` (trilha completa). O custo/tokens das chamadas de LLM
-extras são somados no próprio `AuditResult`.
+veredito), `unsupported_confirmed`, as anotações de corroboração,
+`verification_trail` (trilha completa), `supporting_reference_ids` (quais das
+referências citadas realmente sustentaram o claim) e `unsupported_aspects`
+(partes do claim não cobertas pela evidência — preenchido mesmo sob veredito
+`supported`). O custo/tokens das chamadas de LLM extras são somados no próprio
+`AuditResult`.
 
 Parâmetros em `.env`: `VERIFICATION_NEIGHBOR_WINDOW` (1),
-`VERIFICATION_RERANK_TOP_K` (40), `VERIFICATION_FULL_DOC_WINDOW_TOKENS` (6000),
+`VERIFICATION_RERANK_TOP_K` (20), `VERIFICATION_FULL_DOC_WINDOW_TOKENS` (6000),
 `VERIFICATION_FULL_DOC_WINDOW_OVERLAP` (300).
 
 ## Relatório
@@ -156,7 +197,8 @@ aplicam:
 1. **Metadados** — run id, ferramenta, arquivo auditado, tempo de processamento
    (`dias:horas:min:seg`), modelo/provider/parâmetros do juiz usados na run.
 2. **Distribuição de Vereditos** — contagem e % de
-   SUPPORTED/UNSUPPORTED/CONTRADICTED (e SKIPPED, quando houver).
+   SUPPORTED/UNSUPPORTED/CONTRADICTED (e SKIPPED, quando houver); quantos dos
+   SUPPORTED são **parcialmente suportados** (têm `unsupported_aspects`).
 3. **Verificação de UNSUPPORTED** — quantos `UNSUPPORTED` iniciais foram
    **confirmados**, quantos foram **reclassificados** (por etapa) e quantos são
    **provável erro de citação** (corroborados por outra referência).
@@ -164,13 +206,19 @@ aplicam:
    tabela de preços (ex: `openai`), a seção avisa que o custo é um piso, não o
    valor real (só `anthropic` com modelo tabelado e execução local são
    contabilizados).
-5. **Análise por Referência** — status, nº de citações e distribuição de
-   veredito por referência; quantas referências nunca foram citadas.
+5. **Análise por Referência** — por referência: status, nº de citações, coluna
+   **Suporte** (`M/N` = quantas dessas citações realmente tiveram nela evidência
+   de suporte), e distribuição de veredito. Sinaliza referências citadas mas
+   nunca creditadas como fonte de suporte.
 6. **Referências Mortas e Inacessíveis** — HTTP 404 e 403/timeout/SSL após
-   esgotar as estratégias de fetch.
-7. **Exemplos por Veredito** — até 3 por veredito, com trecho + justificativa;
-   para `UNSUPPORTED`, também a linha de verificação (confirmado ou não, trilha).
-8. **Chunks Não Auditados** — chunks pulados e o motivo.
+   esgotar as estratégias de fetch (com retry serial de timeout no fim do run).
+7. **Exemplos por Veredito** — até 3 por veredito, com trecho, justificativa,
+   evidência literal, quais referências sustentaram, aspectos não cobertos e — se
+   reclassificado — o que o baseline dizia + trilha da cascata.
+8. **Afirmações Possivelmente sem Fonte** — chunks com ≥3 frases em que só a
+   última está ancorada por uma citação (as anteriores podem estar sem fonte).
+9. **Chunks Não Auditados** — chunks pulados, agrupados por motivo (não citam
+   nada / citam referência não baixada).
 
 ## Estrutura
 

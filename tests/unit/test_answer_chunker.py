@@ -72,3 +72,21 @@ def test_trailing_text_after_last_marker_becomes_final_chunk_without_references(
 
     assert chunks[-1].cited_reference_ids == []
     assert "Trecho final" in chunks[-1].text
+
+
+def test_sentence_count_flags_multi_claim_chunks():
+    text = (
+        "Primeira afirmação sem fonte. Segunda afirmação sem fonte. "
+        "Terceira afirmação, agora citada [1]"
+    )
+    chunks = AnswerChunker().chunk(text, answer_id="a1", references=[_ref("refA", ["[1]"])])
+
+    anchored = [c for c in chunks if c.cited_reference_ids]
+    assert len(anchored) == 1
+    assert anchored[0].cited_reference_ids == ["refA"]
+    assert anchored[0].sentence_count == 3
+
+
+def test_single_sentence_chunk_has_sentence_count_one():
+    chunks = AnswerChunker().chunk("Uma afirmação só [1]", answer_id="a1", references=[_ref("refA", ["[1]"])])
+    assert chunks[0].sentence_count == 1

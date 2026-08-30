@@ -155,3 +155,43 @@ def test_mixed_batch_updates_each_reference_independently(tmp_path: Path):
     assert statuses["ok1"] == ReferenceStatus.DOWNLOADED
     assert statuses["dead1"] == ReferenceStatus.DEAD
     assert len(documents) == 1
+
+
+class _FlakyFetcher:
+    """Falha com InaccessibleReferenceError na 1ª chamada de cada URL,
+    entrega na 2ª — simula timeout transitorio recuperado pela 2ª passada."""
+
+    def __init__(self, success: dict[str, FetchResult]):
+        self._success = success
+        self.calls: dict[str, int] = {}
+
+    def fetch(self, url: str) -> FetchResult:
+        self.calls[url] = self.calls.get(url, 0) + 1
+        if self.calls[url] == 1:
+            raise InaccessibleReferenceError("timeout transitorio")
+        return self._success[url]
+
+    def fetch_via_playwright(self, url: str) -> FetchResult:
+        return self.fetch(url)
+
+
+def test_inaccessible_reference_is_retried_and_can_recover(tmp_path: Path):
+    ref = _reference("flaky1", "https://example.com/flaky")
+    registry = ReferenceRegistry(tmp_path)
+    fetcher = _FlakyFetcher({"https://example.com/flaky": _html_result()})
+
+    updated, documents = ingest_references([ref], registry, fetcher=fetcher)
+
+    assert updated[0].status == ReferenceStatus.DOWNLOADED
+    assert fetcher.calls["https://example.com/flaky"] == 2
+    assert len(documents) == 1
+
+
+def test_dead_reference_is_not_retried_by_the_inaccessible_pass(tmp_path: Path):
+    ref = _reference("dead1", "https://example.com/404")
+    registry = ReferenceRegistry(tmp_path)
+    fetcher = FakeFetcher({"https://example.com/404": DeadReferenceError("404")})
+
+    ingest_references([ref], registry, fetcher=fetcher)
+
+    assert fetcher.calls["https://example.com/404"] == 1  # so a passada principal
