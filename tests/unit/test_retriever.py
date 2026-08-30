@@ -180,3 +180,72 @@ def test_retrieve_expanded_skips_when_no_citation():
     chunk = AnswerChunk(id="c1", answer_id="a1", position=0, text="pergunta", cited_reference_ids=[])
 
     assert retriever.retrieve_expanded(chunk).skip_reason is not None
+
+
+def _overlap_store() -> FaissVectorStore:
+    """Trechos contiguos de refA compartilham texto nas fronteiras (o
+    `overlap` do DocumentChunker). refA-1 e o hit."""
+    store = FaissVectorStore(dimension=2)
+    chunks = [
+        _chunk(0, "refA", "O gato subiu no telhado. Ele viu a lua."),
+        _chunk(1, "refA", "Ele viu a lua. Depois desceu correndo."),
+        _chunk(2, "refA", "Depois desceu correndo. Fim da historia."),
+    ]
+    embeddings = [[0.1, 0.9], [1.0, 0.0], [0.1, 0.9]]
+    store.add(chunks, embeddings)
+    return store
+
+
+def test_retrieve_expanded_merges_contiguous_chunks_removing_overlap():
+    store = _overlap_store()
+    embedder = FakeEmbedder({"pergunta": [1.0, 0.0]})
+    retriever = Retriever(embedder, store, reranker=_StubReranker(), top_k=10, rerank_top_k=1)
+
+    chunk = AnswerChunk(id="c1", answer_id="a1", position=0, text="pergunta", cited_reference_ids=["refA"])
+    context = retriever.retrieve_expanded(chunk, neighbor_window=1, rerank_top_k=1).assembled_context
+
+    # trechos 0..2 sao contiguos -> um unico bloco, sem separador
+    assert "---" not in context
+    assert context.count("[referencia=refA") == 1
+    assert "trechos=refA-0..refA-2]" in context
+    # o texto sobreposto aparece uma unica vez
+    assert context.count("Ele viu a lua.") == 1
+    assert context.count("Depois desceu correndo.") == 1
+    # e a passagem fica continua, na ordem do documento
+    assert "O gato subiu no telhado. Ele viu a lua. Depois desceu correndo. Fim da historia." in context
+
+
+def _gap_store() -> FaissVectorStore:
+    store = FaissVectorStore(dimension=2)
+    chunks = [_chunk(i, "refA", f"trecho {i} de A") for i in range(7)]
+    embeddings = [[1.0, 0.0] if i in (1, 5) else [0.0, 1.0] for i in range(7)]
+    store.add(chunks, embeddings)
+    return store
+
+
+def test_retrieve_expanded_keeps_separator_between_disjoint_runs():
+    store = _gap_store()
+    embedder = FakeEmbedder({"pergunta": [1.0, 0.0]})
+    retriever = Retriever(embedder, store, reranker=None, top_k=10, rerank_top_k=2)
+
+    chunk = AnswerChunk(id="c1", answer_id="a1", position=0, text="pergunta", cited_reference_ids=["refA"])
+    curated = retriever.retrieve_expanded(chunk, neighbor_window=1, rerank_top_k=2)
+
+    # hits refA-1 e refA-5, janela +-1 -> runs [0,1,2] e [4,5,6]
+    assert curated.assembled_context.count("\n\n---\n\n") == 1
+    assert "trechos=refA-0..refA-2]" in curated.assembled_context
+    assert "trechos=refA-4..refA-6]" in curated.assembled_context
+    # passages continua sendo um por trecho (registro fiel do que foi recuperado)
+    assert [p.reference_chunk_id for p in curated.passages] == [
+        "refA-0", "refA-1", "refA-2", "refA-4", "refA-5", "refA-6",
+    ]
+
+
+def test_merge_overlapping_ignores_trivial_common_prefix():
+    from auditframework.indexing.retriever import _merge_overlapping
+
+    merged = _merge_overlapping("## Secao um", "## Secao dois")
+    # nao pode colar em "## " (abaixo do minimo) -> junta com quebra, sem perder texto
+    assert "## Secao um" in merged
+    assert "## Secao dois" in merged
+    assert merged.count("Secao") == 2

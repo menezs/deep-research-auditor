@@ -133,7 +133,7 @@ class Retriever:
         return CuratedDocument(
             answer_chunk_id=chunk.id,
             passages=passages,
-            assembled_context=_assemble_context_in_document_order(passages),
+            assembled_context=_assemble_stitched_context(expanded),
         )
 
     def _expand_with_neighbors(self, hits: list[ReferenceChunk], window: int) -> list[ReferenceChunk]:
@@ -161,11 +161,56 @@ def _assemble_context(passages: list[RetrievedPassage]) -> str:
     return "\n\n---\n\n".join(blocks)
 
 
-def _assemble_context_in_document_order(passages: list[RetrievedPassage]) -> str:
-    """Variante usada pela expansao de contexto (Etapa A): os trechos ja
-    vem em ordem de documento (nao por score), entao o cabecalho marca so
-    a proveniencia, sem sugerir um ranking."""
-    if not passages:
+# Deduplicacao de contexto da Etapa A: `DocumentChunker` usa `overlap`, entao
+# trechos vizinhos do mesmo documento compartilham texto nas fronteiras. Ao
+# costurar trechos contiguos num bloco unico, removemos essa sobreposicao —
+# `_MIN_OVERLAP_CHARS` impede colar dois trechos por um prefixo trivial comum
+# ("## ", ". "), `_MAX_OVERLAP_SCAN_CHARS` limita o custo da busca de sufixo.
+_MIN_OVERLAP_CHARS = 12
+_MAX_OVERLAP_SCAN_CHARS = 2000
+
+
+def _is_contiguous(a: ReferenceChunk, b: ReferenceChunk) -> bool:
+    """`b` e o trecho imediatamente seguinte a `a` no mesmo documento —
+    `reference_chunks()` devolve os trechos em ordem de documento com
+    `embedding_id` consecutivo."""
+    return a.reference_id == b.reference_id and b.embedding_id == a.embedding_id + 1
+
+
+def _merge_overlapping(acc: str, nxt: str) -> str:
+    """Concatena `nxt` a `acc` removendo a maior sobreposicao real entre o
+    fim de `acc` e o inicio de `nxt` (o `overlap` do chunker). Se `nxt` ja
+    esta inteiramente contido no fim de `acc`, nao acrescenta nada."""
+    tail = acc[-_MAX_OVERLAP_SCAN_CHARS:]
+    for k in range(min(len(tail), len(nxt)), _MIN_OVERLAP_CHARS - 1, -1):
+        if tail[-k:] == nxt[:k]:
+            return acc + nxt[k:]
+    return acc + "\n\n" + nxt
+
+
+def _assemble_stitched_context(chunks: list[ReferenceChunk]) -> str:
+    """Contexto da Etapa A: os trechos vem em ordem de documento (nao por
+    score). Funde sequencias de trechos contiguos num unico bloco continuo,
+    removendo a sobreposicao repetida entre eles, e separa por `---` apenas
+    regioes de fato descontinuas — para o juiz ler cada passagem como texto
+    corrido, sem frases repetidas."""
+    if not chunks:
         return ""
-    blocks = [f"[referencia={p.reference_id} trecho={p.reference_chunk_id}]\n{p.text}" for p in passages]
+    runs: list[list[ReferenceChunk]] = []
+    for chunk in chunks:
+        if runs and _is_contiguous(runs[-1][-1], chunk):
+            runs[-1].append(chunk)
+        else:
+            runs.append([chunk])
+
+    blocks: list[str] = []
+    for run in runs:
+        text = run[0].text
+        for nxt in run[1:]:
+            text = _merge_overlapping(text, nxt.text)
+        if len(run) == 1:
+            header = f"[referencia={run[0].reference_id} trecho={run[0].id}]"
+        else:
+            header = f"[referencia={run[0].reference_id} trechos={run[0].id}..{run[-1].id}]"
+        blocks.append(f"{header}\n{text}")
     return "\n\n---\n\n".join(blocks)

@@ -156,8 +156,11 @@ mesma referência citada** corrigindo esses três pontos:
   (não só os 30 do `RETRIEVAL_TOP_K`);
 - expande cada trecho sobrevivente com os `VERIFICATION_NEIGHBOR_WINDOW` (1)
   trechos imediatamente vizinhos no mesmo documento (o *big* do *small-to-big*);
-- remonta o contexto em **ordem de documento** (não por score), para o juiz ler
-  a passagem como texto corrido.
+- remonta o contexto em **ordem de documento** (não por score) e **funde os
+  trechos contíguos num único bloco contínuo, removendo a sobreposição de texto
+  repetida entre eles** (o `overlap` do chunker) — regiões distintas do
+  documento continuam separadas por `---`. O juiz lê cada passagem como texto
+  corrido, sem frases duplicadas inflando o prompt.
 
 Com esse contexto ampliado e contínuo, o **mesmo juiz** re-julga o chunk. Se
 achar suporte → `SUPPORTED` e a cascata para; se contradição → `CONTRADICTED`;
