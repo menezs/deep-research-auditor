@@ -11,6 +11,22 @@ _ANTHROPIC_PRICING_PER_MILLION: dict[str, tuple[float, float]] = {
 _LOCAL_PROVIDERS = {"local", "ollama"}
 
 
+def is_cost_tracked(provider: str, model: str) -> bool:
+    """True apenas quando `cost_usd` produz um valor confiavel para este
+    provider/modelo: execucao local (custo real = 0) ou um modelo Anthropic
+    com preco tabelado em `_ANTHROPIC_PRICING_PER_MILLION`.
+
+    Para `openai` e qualquer outro provider pago sem tabela embutida,
+    `cost_usd` retorna 0.0 — que NAO deve ser lido como "gratis". Quem
+    exibe custo (o relatorio) usa esta funcao para deixar claro que o
+    valor nao foi contabilizado, em vez de mostrar US$ 0,00 silenciosamente."""
+    if provider in _LOCAL_PROVIDERS:
+        return True
+    if provider == "anthropic":
+        return model in _ANTHROPIC_PRICING_PER_MILLION
+    return False
+
+
 def cost_usd(provider: str, model: str, prompt_tokens: int, completion_tokens: int) -> float:
     """Estima o custo em USD de uma chamada de LLM.
 

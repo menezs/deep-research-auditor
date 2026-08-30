@@ -313,17 +313,25 @@ bloco de texto), preservando marcadores de citação dentro delas.
 
 Cada run gera, em `data/runs/<run_id>/`, `report.md` (legível) e
 `report.json` (mesmos dados, para consumo programático). Seções do
-`report.md`:
+`report.md`, nesta ordem — as condicionais (5 e 6) são omitidas quando
+não se aplicam e a numeração é reatribuída sequencialmente, sem deixar
+buracos:
 
 1. **Metadados da Execução** — run id, ferramenta, tempo de
-   processamento e o modelo/provider/parâmetros (`temperature`,
-   `max_retries`, `retry_delay`, `base_url` quando aplicável) do LLM
-   juiz usado nessa run — persistido para consulta posterior, mesmo que
-   a configuração (`.env`) mude depois.
+   processamento (formato `dias:horas:min:seg`) e o modelo/provider/
+   parâmetros (`temperature`, `max_retries`, `retry_delay`, `base_url`
+   quando aplicável) do LLM juiz usado nessa run — persistido para
+   consulta posterior, mesmo que a configuração (`.env`) mude depois. O
+   cabeçalho do relatório também traz o caminho do arquivo auditado (o
+   passado ao comando `audit`).
 2. **Distribuição de Vereditos** — contagem e percentual de
    SUPPORTED/UNSUPPORTED/CONTRADICTED (e SKIPPED, quando houver).
 3. **Custo e Uso de Tokens** — custo total estimado, tokens totais e
-   médias por requisição ao juiz.
+   médias por requisição ao juiz. Quando o provider/modelo do juiz não
+   tem tabela de preços neste framework (ex: `openai`), a seção abre com
+   um aviso de que o custo não foi contabilizado — os valores são um
+   piso, não o custo real (só `anthropic` com modelo tabelado e execução
+   local são contabilizados).
 4. **Análise por Referência** — tabela por referência citada (status,
    número de citações, distribuição de veredito), incluindo quantas e
    qual percentual das referências extraídas não foram citadas por

@@ -17,7 +17,7 @@ from .llm_client import (
     create_llm_client,
     parse_json_object,
 )
-from .pricing import cost_usd
+from .pricing import cost_usd, is_cost_tracked
 from .run_id import make_run_id
 
 __all__ = [
@@ -38,4 +38,5 @@ __all__ = [
     "create_llm_client",
     "parse_json_object",
     "cost_usd",
+    "is_cost_tracked",
 ]

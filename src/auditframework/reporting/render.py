@@ -1,6 +1,22 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from ..models import AnswerChunk, AuditResult, AuditVerdict, Reference, Report, ToolStats
+
+
+@dataclass
+class ReportSection:
+    """Uma secao do relatorio, sem numero — o numero e atribuido por
+    `ReportRenderer.to_markdown` na ordem em que as secoes NAO vazias
+    aparecem, para que uma secao condicional ausente (ex: sem referencias
+    mortas) nao deixe um buraco na numeracao (1, 2, 3, 4, 7...)."""
+
+    title: str
+    body: str
+
+    def render(self, number: int) -> str:
+        return f"## {number}. {self.title}\n\n{self.body}"
 
 _VERDICT_LABELS: dict[AuditVerdict, str] = {
     AuditVerdict.SUPPORTED: "SUPPORTED",
@@ -15,6 +31,16 @@ _EXCERPT_LEN = 220
 def _excerpt(text: str, length: int = _EXCERPT_LEN) -> str:
     text = " ".join(text.split())
     return text if len(text) <= length else text[: length - 1].rstrip() + "…"
+
+
+def _format_duration(seconds: float) -> str:
+    """Segundos -> `dias:horas:min:seg` (`D:HH:MM:SS`, dias sem zero à
+    esquerda)."""
+    total = int(round(max(seconds, 0.0)))
+    days, rem = divmod(total, 86_400)
+    hours, rem = divmod(rem, 3_600)
+    minutes, secs = divmod(rem, 60)
+    return f"{days}:{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
 class ReportRenderer:
@@ -46,34 +72,42 @@ class ReportRenderer:
         self._results = results or []
 
     def to_markdown(self) -> str:
-        sections = [
-            self._render_header(),
+        candidates = [
             self._render_metadata(),
             self._render_distribution(),
             self._render_cost(),
             self._render_reference_ranking(),
             self._render_dead_and_inaccessible(),
+            self._render_examples() if self._results else None,
+            self._render_skipped_chunks(),
         ]
-        if self._results:
-            sections.append(self._render_examples())
-        sections.append(self._render_skipped_chunks())
-        return "\n\n---\n\n".join(section for section in sections if section)
+        parts = [self._render_header()]
+        number = 0
+        for section in candidates:
+            if section is None:
+                continue
+            number += 1
+            parts.append(section.render(number))
+        return "\n\n---\n\n".join(parts)
 
     def to_json(self) -> str:
         return self.report.model_dump_json(indent=2)
 
     def _render_header(self) -> str:
         report = self.report
-        return f"# Relatório de Auditoria — {report.tool_name} ({report.answer_id})"
+        header = f"# Relatório de Auditoria — {report.tool_name} ({report.answer_id})"
+        if report.answer_path:
+            header += f"\n\n**Arquivo auditado:** `{report.answer_path}`"
+        return header
 
-    def _render_metadata(self) -> str:
+    def _render_metadata(self) -> ReportSection:
         report = self.report
         rows = [
             ("Run ID", report.run_id),
             ("Ferramenta", report.tool_name),
             ("Gerado em", report.generated_at.isoformat()),
             ("Total de chunks", str(report.total_chunks)),
-            ("Tempo de processamento", f"{report.processing_time_seconds:.1f}s"),
+            ("Tempo de processamento", _format_duration(report.processing_time_seconds)),
         ]
         judge = report.judge_config
         if judge is not None:
@@ -85,9 +119,9 @@ class ReportRenderer:
             if judge.base_url:
                 rows.append(("Base URL", judge.base_url))
         table = "\n".join(f"| **{label}** | {value} |" for label, value in rows)
-        return "## 1. Metadados da Execução\n\n| Campo | Valor |\n|---|---|\n" + table
+        return ReportSection("Metadados da Execução", "| Campo | Valor |\n|---|---|\n" + table)
 
-    def _render_distribution(self) -> str:
+    def _render_distribution(self) -> ReportSection:
         report = self.report
         pct_skipped = (report.count_skipped / report.total_chunks * 100.0) if report.total_chunks else 0.0
         rows = [
@@ -103,9 +137,11 @@ class ReportRenderer:
             total_chunks += report.count_skipped
             total_pct += pct_skipped
         table += f"\n| **TOTAL** | {total_chunks} | {total_pct:.1f}% |"
-        return "## 2. Distribuição de Vereditos\n\n| Veredito | Chunks | Percentual |\n|---|---|---|\n" + table
+        return ReportSection(
+            "Distribuição de Vereditos", "| Veredito | Chunks | Percentual |\n|---|---|---|\n" + table
+        )
 
-    def _render_cost(self) -> str:
+    def _render_cost(self) -> ReportSection:
         report = self.report
         total_requests = report.count_supported + report.count_unsupported + report.count_contradicted
         avg_tokens = report.total_tokens / total_requests if total_requests else 0.0
@@ -117,12 +153,23 @@ class ReportRenderer:
             ("Média de custo por requisição", f"US$ {avg_cost:.4f}"),
         ]
         table = "\n".join(f"| **{label}** | {value} |" for label, value in rows)
-        return "## 3. Custo e Uso de Tokens\n\n| Métrica | Valor |\n|---|---|\n" + table
+        body = "| Métrica | Valor |\n|---|---|\n" + table
+        if not report.cost_tracked:
+            judge = report.judge_config
+            provider = judge.provider if judge is not None else "desconhecido"
+            model = judge.model if judge is not None else "desconhecido"
+            body = (
+                f"> ⚠️ **Custo não contabilizado** — o provider `{provider}` (modelo `{model}`) não tem "
+                "tabela de preços neste framework. Os valores abaixo somam apenas chamadas com preço "
+                "conhecido (Anthropic) ou custo local zero, e devem ser lidos como um piso, não como o "
+                "custo real da execução.\n\n"
+            ) + body
+        return ReportSection("Custo e Uso de Tokens", body)
 
-    def _render_reference_ranking(self) -> str:
+    def _render_reference_ranking(self) -> ReportSection:
         stats = self.report.reference_stats
         if not stats:
-            return "## 4. Análise por Referência\n\nNenhuma referência citada nos chunks avaliados."
+            return ReportSection("Análise por Referência", "Nenhuma referência citada nos chunks avaliados.")
         total = len(stats)
         uncited = sum(1 for s in stats if s.times_cited == 0)
         pct_uncited = (uncited / total) * 100.0
@@ -138,7 +185,7 @@ class ReportRenderer:
             f"{s.supported_count} | {s.unsupported_count} | {s.contradicted_count} |"
             for s in stats
         )
-        return "## 4. Análise por Referência\n\n" + summary + header + rows
+        return ReportSection("Análise por Referência", summary + header + rows)
 
     def _reference_label(self, reference_id: str, fallback_url: str) -> str:
         reference = self._reference_by_id.get(reference_id)
@@ -146,43 +193,42 @@ class ReportRenderer:
             return " ".join(reference.citation_markers)
         return fallback_url
 
-    def _render_dead_and_inaccessible(self) -> str:
+    def _render_dead_and_inaccessible(self) -> ReportSection | None:
         report = self.report
         if not report.dead_references and not report.inaccessible_references:
-            return ""
-        lines = ["## 5. Referências Mortas e Inacessíveis"]
+            return None
+        lines: list[str] = []
         if report.dead_references:
-            lines.append("\n### Mortas (HTTP 404)\n")
+            lines.append("### Mortas (HTTP 404)\n")
             lines.append("\n".join(f"- {r.raw_url} — {r.error_message or 'sem detalhes'}" for r in report.dead_references))
         if report.inaccessible_references:
             lines.append("\n### Inacessíveis (403/timeout/SSL)\n")
             lines.append(
                 "\n".join(f"- {r.raw_url} — {r.error_message or 'sem detalhes'}" for r in report.inaccessible_references)
             )
-        return "\n".join(lines)
+        return ReportSection("Referências Mortas e Inacessíveis", "\n".join(lines))
 
-    def _render_skipped_chunks(self) -> str:
+    def _render_skipped_chunks(self) -> ReportSection | None:
         skipped = self.report.skipped_chunks
         if not skipped:
-            return ""
-        lines = ["## 7. Chunks Não Auditados"]
-        lines.append("\n".join(f"- `{s.answer_chunk_id}` — {s.reason}" for s in skipped))
-        return "\n\n".join(lines)
+            return None
+        body = "\n".join(f"- `{s.answer_chunk_id}` — {s.reason}" for s in skipped)
+        return ReportSection("Chunks Não Auditados", body)
 
-    def _render_examples(self) -> str:
+    def _render_examples(self) -> ReportSection:
         by_verdict: dict[AuditVerdict, list[AuditResult]] = {v: [] for v in AuditVerdict}
         for result in self._results:
             by_verdict[result.verdict].append(result)
 
-        blocks = ["## 6. Exemplos Representativos por Veredito"]
+        blocks: list[str] = []
         for verdict, label in _VERDICT_LABELS.items():
             examples = by_verdict.get(verdict, [])[:_MAX_EXAMPLES_PER_VERDICT]
             if not examples:
                 continue
-            blocks.append(f"\n### {label}\n")
+            blocks.append(f"### {label}\n")
             for result in examples:
                 blocks.append(self._render_example(result))
-        return "\n".join(blocks)
+        return ReportSection("Exemplos Representativos por Veredito", "\n".join(blocks))
 
     def _render_example(self, result: AuditResult) -> str:
         chunk = self._chunk_by_id.get(result.answer_chunk_id)

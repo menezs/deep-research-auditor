@@ -19,6 +19,7 @@ from .extraction.reference_extractor import (
     extract_references,
 )
 from .common.llm_client import LLMClient, create_llm_client
+from .common.pricing import is_cost_tracked
 from .indexing.chunkers import AnswerChunker, DocumentChunker
 from .indexing.embeddings import BGEEmbedder, Embedder
 from .indexing.reranker import Reranker
@@ -373,6 +374,7 @@ class ReportingStage:
             run_id=ctx.run_id,
             answer_id=ctx.run_id,
             tool_name=ctx.tool_name,
+            answer_path=str(ctx.answer_path),
             chunks=chunks,
             references=references,
             results=results,
@@ -427,6 +429,15 @@ def build_pipeline(settings: Settings, *, full_corpus_mode: bool = False) -> Pip
     embedder = BGEEmbedder(settings.embedding_model, settings.model_cache_dir)
     reranker = Reranker(settings.reranker_model, settings.model_cache_dir)
     llm_client = create_llm_client(settings)
+
+    if not is_cost_tracked(settings.llm_provider, settings.llm_model):
+        logger.warning(
+            "Custo por token nao e estimado para provider=%r modelo=%r — o relatorio mostrara "
+            "US$ 0,00 para o juiz LLM (apenas 'anthropic' com modelo tabelado e execucao local sao "
+            "contabilizados).",
+            settings.llm_provider,
+            settings.llm_model,
+        )
 
     pipeline = Pipeline(settings)
     pipeline.add_stage(ExtractionStage())

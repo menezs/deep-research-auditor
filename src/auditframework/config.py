@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -49,7 +49,12 @@ class Settings(BaseSettings):
         return self.runs_dir / run_id
 
 
+@lru_cache
 def get_settings() -> Settings:
     """Ponto unico de construcao de Settings, para permitir troca por
-    injecao de dependencia (ex: em testes) sem tocar nos consumidores."""
+    injecao de dependencia (ex: em testes) sem tocar nos consumidores.
+
+    O resultado e cacheado — `.env` e lido uma unica vez por processo, nao
+    a cada chamada. Use `get_settings.cache_clear()` para forcar releitura
+    (ex: em um teste que altera o ambiente, ou num REPL)."""
     return Settings()

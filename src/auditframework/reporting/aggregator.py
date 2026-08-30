@@ -15,6 +15,7 @@ from ..models import (
     SkippedChunk,
     ToolStats,
 )
+from ..common.pricing import is_cost_tracked
 from .cost_tracker import summarize_cost
 
 _VERDICT_PCT_FIELDS: dict[AuditVerdict, str] = {
@@ -98,6 +99,7 @@ def aggregate_report(
     run_id: str,
     answer_id: str,
     tool_name: str,
+    answer_path: str | None = None,
     chunks: list[AnswerChunk],
     references: list[Reference],
     results: list[AuditResult],
@@ -114,11 +116,15 @@ def aggregate_report(
     counts = _verdict_counts(results)
     cost = summarize_cost(results)
     skipped = skipped or []
+    cost_tracked = (
+        is_cost_tracked(judge_config.provider, judge_config.model) if judge_config is not None else True
+    )
 
     return Report(
         run_id=run_id,
         answer_id=answer_id,
         tool_name=tool_name,
+        answer_path=answer_path,
         generated_at=generated_at or datetime.now(timezone.utc),
         judge_config=judge_config,
         total_chunks=len(chunks),
@@ -135,6 +141,7 @@ def aggregate_report(
         reference_stats=build_reference_stats(chunks, references, results),
         total_cost_usd=cost.total_cost_usd,
         total_tokens=cost.total_tokens,
+        cost_tracked=cost_tracked,
         processing_time_seconds=processing_time_seconds,
     )
 

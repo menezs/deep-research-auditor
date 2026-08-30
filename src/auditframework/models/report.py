@@ -44,6 +44,7 @@ class Report(BaseModel):
     run_id: str
     answer_id: str
     tool_name: str
+    answer_path: str | None = None
     generated_at: datetime
 
     judge_config: JudgeConfig | None = None
@@ -65,4 +66,9 @@ class Report(BaseModel):
 
     total_cost_usd: float = 0.0
     total_tokens: int = 0
+    cost_tracked: bool = True
+    """False quando o provider/modelo do juiz nao tem preco tabelado neste
+    framework (ex: `openai`) — nesse caso `total_cost_usd` e um piso, nao o
+    custo real, e o relatorio sinaliza isso explicitamente. Ver
+    `common.pricing.is_cost_tracked`."""
     processing_time_seconds: float = 0.0

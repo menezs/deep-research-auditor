@@ -178,6 +178,7 @@ pyrightconfig.json
 # artefatos de execucao (por run) - nunca versionados
 data/runs/
 model_cache/
+answers/*/*
 answers/*md
 answers/*pdf
 answers/*docx

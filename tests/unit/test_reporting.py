@@ -4,10 +4,12 @@ import json
 
 import pytest
 
+from auditframework.common.pricing import is_cost_tracked
 from auditframework.models import (
     AnswerChunk,
     AuditResult,
     AuditVerdict,
+    JudgeConfig,
     Reference,
     ReferenceStatus,
     SkippedChunk,
@@ -21,6 +23,7 @@ from auditframework.reporting import (
     render_tool_comparison_markdown,
     summarize_cost,
 )
+from auditframework.reporting.render import _format_duration
 
 
 def _reference(ref_id: str, *, status: ReferenceStatus = ReferenceStatus.DOWNLOADED, **overrides) -> Reference:
@@ -301,8 +304,28 @@ class TestRender:
 
         assert "| **SKIPPED** | 1 | 50.0% |" in markdown
         assert "| **TOTAL** | 2 | 100.0% |" in markdown
-        assert "## 7. Chunks Não Auditados" in markdown
+        # sem referencias mortas nesse cenario, entao a secao 5 (mortas/inacessiveis)
+        # nao existe e "Chunks Não Auditados" e numerada sem deixar buraco.
+        assert "## 6. Chunks Não Auditados" in markdown
         assert "`c2` — chunk nao cita nenhuma referencia" in markdown
+
+    def test_section_numbering_has_no_gaps_when_conditional_sections_are_absent(self):
+        # so as 4 secoes sempre presentes: metadados, distribuicao, custo, referencias.
+        chunks = [_chunk("c1", ["r1"])]
+        results = [_result("c1", AuditVerdict.SUPPORTED)]
+        report = aggregate_report(
+            run_id="run-1", answer_id="answer-1", tool_name="ChatGPT",
+            chunks=chunks, references=[_reference("r1")], results=results,
+        )
+        markdown = render_markdown(report)  # sem results -> sem secao de exemplos
+
+        assert "## 1. Metadados da Execução" in markdown
+        assert "## 2. Distribuição de Vereditos" in markdown
+        assert "## 3. Custo e Uso de Tokens" in markdown
+        assert "## 4. Análise por Referência" in markdown
+        assert "## 5." not in markdown
+        assert "Referências Mortas e Inacessíveis" not in markdown
+        assert "Chunks Não Auditados" not in markdown
 
     def test_markdown_without_raw_results_skips_examples_section(self):
         report, chunks, references, _results = self._sample_report()
@@ -325,3 +348,92 @@ class TestRender:
 
     def test_empty_tool_comparison_does_not_crash(self):
         assert "Nenhum dado" in render_tool_comparison_markdown([])
+
+    def test_processing_time_is_rendered_as_days_hours_min_sec(self):
+        report = aggregate_report(
+            run_id="run-1", answer_id="answer-1", tool_name="ChatGPT",
+            chunks=[], references=[], results=[],
+            processing_time_seconds=90_061.4,  # 1d 01:01:01
+        )
+        markdown = render_markdown(report)
+        assert "| **Tempo de processamento** | 1:01:01:01 |" in markdown
+
+    def test_header_includes_audited_file_path_when_present(self):
+        report = aggregate_report(
+            run_id="run-1", answer_id="answer-1", tool_name="ChatGPT",
+            answer_path="answers/gemini_direito.pdf", chunks=[], references=[], results=[],
+        )
+        markdown = render_markdown(report)
+        assert "**Arquivo auditado:** `answers/gemini_direito.pdf`" in markdown
+
+    def test_header_omits_file_path_when_absent(self):
+        report = aggregate_report(
+            run_id="run-1", answer_id="answer-1", tool_name="ChatGPT",
+            chunks=[], references=[], results=[],
+        )
+        assert "Arquivo auditado" not in render_markdown(report)
+
+
+class TestFormatDuration:
+    def test_sub_minute(self):
+        assert _format_duration(3.2) == "0:00:00:03"
+
+    def test_hours_and_minutes(self):
+        assert _format_duration(3_600 + 12 * 60 + 5) == "0:01:12:05"
+
+    def test_multiple_days(self):
+        assert _format_duration(2 * 86_400 + 3 * 3_600) == "2:03:00:00"
+
+    def test_negative_clamped_to_zero(self):
+        assert _format_duration(-5) == "0:00:00:00"
+
+
+def _judge_config(provider: str, model: str) -> JudgeConfig:
+    return JudgeConfig(provider=provider, model=model, temperature=0.0, max_retries=3, retry_delay=2.0)
+
+
+class TestIsCostTracked:
+    def test_local_and_ollama_are_tracked(self):
+        assert is_cost_tracked("local", "openai/gpt-oss-20b") is True
+        assert is_cost_tracked("ollama", "qualquer-modelo") is True
+
+    def test_anthropic_tracked_only_for_known_model(self):
+        assert is_cost_tracked("anthropic", "claude-sonnet-5") is True
+        assert is_cost_tracked("anthropic", "claude-modelo-inexistente") is False
+
+    def test_openai_and_unknown_providers_are_not_tracked(self):
+        assert is_cost_tracked("openai", "gpt-4o") is False
+        assert is_cost_tracked("outro", "x") is False
+
+
+class TestCostTrackedInReport:
+    def _report(self, judge_config: JudgeConfig | None):
+        chunks = [_chunk("c1", ["r1"])]
+        results = [_result("c1", AuditVerdict.SUPPORTED, cost_usd=0.0, prompt_tokens=100, completion_tokens=20)]
+        return aggregate_report(
+            run_id="run-1", answer_id="answer-1", tool_name="ChatGPT",
+            chunks=chunks, references=[_reference("r1")], results=results, judge_config=judge_config,
+        )
+
+    def test_report_defaults_to_cost_tracked_without_judge_config(self):
+        assert self._report(None).cost_tracked is True
+
+    def test_report_flags_untracked_cost_for_openai(self):
+        report = self._report(_judge_config("openai", "gpt-4o"))
+        assert report.cost_tracked is False
+
+    def test_report_keeps_cost_tracked_for_known_anthropic_model(self):
+        report = self._report(_judge_config("anthropic", "claude-sonnet-5"))
+        assert report.cost_tracked is True
+
+    def test_markdown_shows_warning_when_cost_not_tracked(self):
+        report = self._report(_judge_config("openai", "gpt-4o"))
+        markdown = render_markdown(report)
+        assert "Custo não contabilizado" in markdown
+        assert "`openai`" in markdown
+        assert "`gpt-4o`" in markdown
+
+    def test_markdown_has_no_warning_when_cost_tracked(self):
+        report = self._report(_judge_config("anthropic", "claude-sonnet-5"))
+        markdown = render_markdown(report)
+        assert "Custo não contabilizado" not in markdown
