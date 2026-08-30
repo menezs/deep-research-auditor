@@ -75,6 +75,7 @@ class ReportRenderer:
         candidates = [
             self._render_metadata(),
             self._render_distribution(),
+            self._render_verification(),
             self._render_cost(),
             self._render_reference_ranking(),
             self._render_dead_and_inaccessible(),
@@ -140,6 +141,33 @@ class ReportRenderer:
         return ReportSection(
             "Distribuição de Vereditos", "| Veredito | Chunks | Percentual |\n|---|---|---|\n" + table
         )
+
+    def _render_verification(self) -> ReportSection | None:
+        """Efeito da cascata de verificação aplicada aos vereditos
+        UNSUPPORTED iniciais (etapas A → B → C)."""
+        report = self.report
+        if not report.verification_ran:
+            return None
+        initial_unsupported = (
+            report.count_unsupported + report.count_reclassified_by_verification
+        )
+        lines = [
+            f"`{initial_unsupported}` chunks tiveram veredito **UNSUPPORTED** no julgamento inicial.",
+            "",
+            f"- `{report.count_unsupported_confirmed}` **confirmados** — sobreviveram à varredura do "
+            "documento citado inteiro (Etapa B).",
+            f"- `{report.count_reclassified_by_verification}` **reclassificados** pela cascata para "
+            "SUPPORTED/CONTRADICTED.",
+            f"- `{report.mis_cited_reference_count}` **provável erro de citação** — não sustentados pela "
+            "fonte citada, mas corroborados por outra referência baixada (Etapa C).",
+        ]
+        if report.verification_stage_counts:
+            by_stage = ", ".join(
+                f"{stage} = {count}" for stage, count in sorted(report.verification_stage_counts.items())
+            )
+            lines.append("")
+            lines.append(f"Reclassificações por etapa: {by_stage}.")
+        return ReportSection("Verificação de UNSUPPORTED", "\n".join(lines))
 
     def _render_cost(self) -> ReportSection:
         report = self.report
@@ -240,11 +268,28 @@ class ReportRenderer:
                     refs.append(", ".join(reference.citation_markers) or reference.raw_url)
         ref_label = " ".join(refs) if refs else "(sem referência resolvida)"
         chunk_excerpt = _excerpt(chunk.text) if chunk is not None else "(chunk indisponível)"
-        return (
-            f"- **Chunk `{result.answer_chunk_id}`** {ref_label}\n"
-            f"  - Trecho: {chunk_excerpt}\n"
-            f"  - Justificativa: {_excerpt(result.justification)}"
-        )
+        lines = [
+            f"- **Chunk `{result.answer_chunk_id}`** {ref_label}",
+            f"  - Trecho: {chunk_excerpt}",
+            f"  - Justificativa: {_excerpt(result.justification)}",
+        ]
+        verification = self._verification_note(result)
+        if verification:
+            lines.append(f"  - Verificação: {verification}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _verification_note(result: AuditResult) -> str:
+        if not result.verification_trail:
+            return ""
+        path = " → ".join(step.stage for step in result.verification_trail)
+        if result.verdict == AuditVerdict.UNSUPPORTED:
+            note = "UNSUPPORTED confirmado" if result.unsupported_confirmed else "UNSUPPORTED (não confirmado)"
+            if result.corroborated_by_other_reference:
+                note += f"; corroborado por outra referência ({', '.join(result.corroborated_by_other_reference)})"
+        else:
+            note = f"reclassificado para {result.verdict.value.upper()} na etapa `{result.verification_stage}`"
+        return f"{note} — cascata: {path}"
 
 
 def render_markdown(

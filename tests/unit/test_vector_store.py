@@ -68,3 +68,15 @@ def test_save_and_load_roundtrip(tmp_path: Path):
     results = reloaded.search([1.0, 0.0, 0.0], top_k=1)
 
     assert results[0][0].text == "conteudo A"
+
+
+def test_reference_chunks_returns_document_order():
+    store = FaissVectorStore(dimension=2)
+    # inseridos fora de ordem de propósito
+    chunks = [_chunk(5, "refA", "A2"), _chunk(4, "refA", "A1"), _chunk(6, "refB", "B1"), _chunk(7, "refA", "A3")]
+    store.add(chunks, [[1.0, 0.0], [0.9, 0.1], [0.0, 1.0], [0.8, 0.2]])
+
+    refa = store.reference_chunks("refA")
+    assert [c.embedding_id for c in refa] == [4, 5, 7]
+    assert [c.text for c in refa] == ["A1", "A2", "A3"]
+    assert store.reference_chunks("refC") == []

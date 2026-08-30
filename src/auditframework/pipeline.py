@@ -29,8 +29,9 @@ from .indexing.vector_store import FaissVectorStore
 from .ingestion.service import Fetcher, ingest_references
 from .ingestion.registry import ReferenceRegistry
 from .judging.judge import Verifier
+from .judging.verification import build_verification_cascade
 from .logging_config import STAGE_COLORS, get_logger, stage_banner, stage_done, stage_skipped
-from .models import AnswerChunk, AuditResult, CuratedDocument, JudgeConfig, SkippedChunk
+from .models import AnswerChunk, AuditResult, AuditVerdict, CuratedDocument, JudgeConfig, SkippedChunk
 from .reporting.aggregator import aggregate_report
 from .reporting.render import render_json, render_markdown
 
@@ -75,7 +76,6 @@ class RunContext:
     settings: Settings
     answer_path: Path
     tool_name: str
-    full_corpus_mode: bool = False
     started_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     stages_completed: list[str] = field(default_factory=list)
 
@@ -93,7 +93,6 @@ def save_run_meta(ctx: RunContext) -> None:
     payload = {
         "answer_path": str(ctx.answer_path),
         "tool_name": ctx.tool_name,
-        "full_corpus_mode": ctx.full_corpus_mode,
         "started_at": ctx.started_at,
     }
     _meta_path(ctx.run_dir).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -112,7 +111,6 @@ def load_run_context(run_id: str, settings: Settings) -> RunContext:
         settings=settings,
         answer_path=Path(meta["answer_path"]),
         tool_name=meta["tool_name"],
-        full_corpus_mode=meta.get("full_corpus_mode", False),
         started_at=meta["started_at"],
     )
 
@@ -270,25 +268,43 @@ class JudgingStage:
         llm_client: LLMClient,
         embedder: Embedder,
         reranker: Reranker | None = None,
-        top_k: int = 50,
-        rerank_top_k: int = 20,
-        full_corpus_mode: bool = False,
+        top_k: int = 30,
+        rerank_top_k: int = 10,
+        *,
+        verification_neighbor_window: int = 1,
+        verification_rerank_top_k: int = 20,
+        verification_full_doc_window_tokens: int = 6000,
+        verification_full_doc_window_overlap: int = 300,
     ):
         self.llm_client = llm_client
         self.embedder = embedder
         self.reranker = reranker
         self.top_k = top_k
         self.rerank_top_k = rerank_top_k
-        self.full_corpus_mode = full_corpus_mode
+        self.verification_neighbor_window = verification_neighbor_window
+        self.verification_rerank_top_k = verification_rerank_top_k
+        self.verification_full_doc_window_tokens = verification_full_doc_window_tokens
+        self.verification_full_doc_window_overlap = verification_full_doc_window_overlap
 
     def run(self, ctx: RunContext) -> None:
         chunks = _load_answer_chunks(ctx.run_dir)
         index_dir = ctx.run_dir / "index"
         store = FaissVectorStore.load(self.embedder.dimension, index_dir / "faiss.index", index_dir / "chunks.json")
-        retriever = Retriever(
-            self.embedder, store, self.reranker, self.top_k, self.rerank_top_k, full_corpus_mode=self.full_corpus_mode
-        )
+        retriever = Retriever(self.embedder, store, self.reranker, self.top_k, self.rerank_top_k)
         verifier = Verifier(self.llm_client)
+        cascade = build_verification_cascade(
+            embedder=self.embedder,
+            vector_store=store,
+            reranker=self.reranker,
+            registry=ReferenceRegistry(ctx.run_dir),
+            llm_client=self.llm_client,
+            top_k=self.top_k,
+            rerank_top_k=self.rerank_top_k,
+            neighbor_window=self.verification_neighbor_window,
+            verification_rerank_top_k=self.verification_rerank_top_k,
+            full_doc_window_tokens=self.verification_full_doc_window_tokens,
+            full_doc_window_overlap=self.verification_full_doc_window_overlap,
+        )
 
         results_path = ctx.run_dir / "audit_results.jsonl"
         skipped_path = ctx.run_dir / "skipped_chunks.jsonl"
@@ -339,6 +355,8 @@ class JudgingStage:
                         exc,
                     )
                     continue
+                if result.verdict == AuditVerdict.UNSUPPORTED:
+                    result = cascade.run(chunk, result)
                 fh.write(result.model_dump_json() + "\n")
                 fh.flush()
 
@@ -419,7 +437,7 @@ class Pipeline:
         return ctx
 
 
-def build_pipeline(settings: Settings, *, full_corpus_mode: bool = False) -> Pipeline:
+def build_pipeline(settings: Settings) -> Pipeline:
     """Monta o pipeline real, resolvendo cada dependencia (Embedder,
     Reranker, LLMClient) a partir do `Settings` (Factory pattern) — os
     adapters concretos (`BGEEmbedder`, `Reranker`, `OpenAICompatibleClient`/
@@ -450,7 +468,10 @@ def build_pipeline(settings: Settings, *, full_corpus_mode: bool = False) -> Pip
             reranker,
             settings.retrieval_top_k,
             settings.rerank_top_k,
-            full_corpus_mode=full_corpus_mode,
+            verification_neighbor_window=settings.verification_neighbor_window,
+            verification_rerank_top_k=settings.verification_rerank_top_k,
+            verification_full_doc_window_tokens=settings.verification_full_doc_window_tokens,
+            verification_full_doc_window_overlap=settings.verification_full_doc_window_overlap,
         )
     )
     pipeline.add_stage(ReportingStage())

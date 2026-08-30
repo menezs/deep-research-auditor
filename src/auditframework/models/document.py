@@ -12,5 +12,5 @@ class Document(BaseModel):
     reference_id: str
     markdown_path: Path
     content_hash: str
-    fetch_method: Literal["requests", "cloudscraper", "playwright", "local_file"]
+    fetch_method: Literal["requests", "cloudscraper", "playwright", "local_file", "reddit_json"]
     word_count: int

@@ -1,6 +1,7 @@
 from ..common.llm_client import AnthropicClient, LLMClient, OpenAICompatibleClient, create_llm_client
 from .judge import Verifier
 from .prompts import JUDGE_SYSTEM_MESSAGE, JudgeOutput, build_judge_prompt
+from .verification import VerificationCascade, build_verification_cascade
 
 __all__ = [
     "AnthropicClient",
@@ -11,4 +12,6 @@ __all__ = [
     "JudgeOutput",
     "JUDGE_SYSTEM_MESSAGE",
     "build_judge_prompt",
+    "VerificationCascade",
+    "build_verification_cascade",
 ]

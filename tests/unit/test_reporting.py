@@ -13,6 +13,7 @@ from auditframework.models import (
     Reference,
     ReferenceStatus,
     SkippedChunk,
+    VerificationStep,
 )
 from auditframework.reporting import (
     aggregate_report,
@@ -437,3 +438,47 @@ class TestCostTrackedInReport:
         report = self._report(_judge_config("anthropic", "claude-sonnet-5"))
         markdown = render_markdown(report)
         assert "Custo não contabilizado" not in markdown
+
+
+def _verified_result(chunk_id, verdict, *, stage="baseline", confirmed=False, corroborated=(), trail_stages=("baseline",)):
+    return AuditResult(
+        answer_chunk_id=chunk_id, verdict=verdict, justification="j", judge_model="m",
+        verification_stage=stage, unsupported_confirmed=confirmed,
+        corroborated_by_other_reference=list(corroborated),
+        verification_trail=[VerificationStep(stage=s, verdict=verdict, note="n") for s in trail_stages],
+    )
+
+
+class TestVerificationSection:
+    def _report(self, results):
+        chunks = [_chunk(r.answer_chunk_id, ["r1"]) for r in results]
+        return aggregate_report(
+            run_id="run-1", answer_id="answer-1", tool_name="ChatGPT",
+            chunks=chunks, references=[_reference("r1")], results=results,
+        )
+
+    def test_no_section_when_verification_never_ran(self):
+        report = self._report([_result("c1", AuditVerdict.SUPPORTED)])
+        assert report.verification_ran is False
+        assert "Verificação de UNSUPPORTED" not in render_markdown(report)
+
+    def test_counts_confirmed_reclassified_and_mis_cited(self):
+        results = [
+            _verified_result("c1", AuditVerdict.UNSUPPORTED, confirmed=True,
+                             trail_stages=("baseline", "context_expansion", "full_doc_scan", "cross_reference")),
+            _verified_result("c2", AuditVerdict.SUPPORTED, stage="context_expansion",
+                             trail_stages=("baseline", "context_expansion")),
+            _verified_result("c3", AuditVerdict.UNSUPPORTED, confirmed=True, corroborated=("r9",),
+                             trail_stages=("baseline", "context_expansion", "full_doc_scan", "cross_reference")),
+        ]
+        report = self._report(results)
+        assert report.verification_ran is True
+        assert report.count_unsupported_confirmed == 2
+        assert report.count_reclassified_by_verification == 1
+        assert report.mis_cited_reference_count == 1
+        assert report.verification_stage_counts == {"context_expansion": 1}
+
+        markdown = render_markdown(report)
+        assert "## 3. Verificação de UNSUPPORTED" in markdown
+        assert "confirmados" in markdown and "reclassificados" in markdown
+        assert "provável erro de citação" in markdown

@@ -16,6 +16,15 @@ class AuditVerdict(str, Enum):
     CONTRADICTED = "contradicted"
 
 
+class VerificationStep(BaseModel):
+    """Um passo da cascata de verificacao aplicada a um veredito
+    `UNSUPPORTED` inicial (ver `judging/verification/`)."""
+
+    stage: str  # context_expansion | full_doc_scan | cross_reference
+    verdict: AuditVerdict
+    note: str
+
+
 class AuditResult(BaseModel):
     """Veredito do juiz LLM para um unico AnswerChunk."""
 
@@ -28,6 +37,21 @@ class AuditResult(BaseModel):
     cost_usd: float = 0.0
     latency_ms: int = 0
     judge_model: str
+
+    # --- Verificacao de vereditos UNSUPPORTED (cascata A -> B -> C) ---
+    verification_stage: str = "baseline"
+    """Etapa que produziu o veredito final: `baseline` (juiz inicial) ou
+    `context_expansion` / `full_doc_scan` / `cross_reference`."""
+    unsupported_confirmed: bool = False
+    """True quando o veredito continuou UNSUPPORTED mesmo apos a varredura
+    do documento citado inteiro (Etapa B) — o claim comprovadamente nao
+    esta na referencia citada."""
+    corroborated_by_other_reference: list[str] = Field(default_factory=list)
+    """Referencias (nao citadas pelo chunk) que sustentam o claim,
+    detectadas pela checagem no corpus inteiro (Etapa C) — sinal de
+    citacao trocada, nao de alegacao infundada."""
+    contradicted_by_other_reference: list[str] = Field(default_factory=list)
+    verification_trail: list[VerificationStep] = Field(default_factory=list)
 
 
 class SkippedChunk(BaseModel):

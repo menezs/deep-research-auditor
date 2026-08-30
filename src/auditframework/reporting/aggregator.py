@@ -52,6 +52,24 @@ def _verdict_counts(results: list[AuditResult]) -> dict[str, int]:
     return {field_name: counts.get(verdict, 0) for verdict, field_name in _VERDICT_COUNT_FIELDS.items()}
 
 
+def _verification_summary(results: list[AuditResult]) -> dict:
+    """Agrega o efeito da cascata de verificacao de UNSUPPORTED
+    (`judging/verification/`)."""
+    verified = [r for r in results if r.verification_trail]
+    reclassified = [r for r in verified if r.verification_stage != "baseline" and r.verdict != AuditVerdict.UNSUPPORTED]
+    return {
+        "verification_ran": bool(verified),
+        "count_unsupported_confirmed": sum(
+            1 for r in verified if r.verdict == AuditVerdict.UNSUPPORTED and r.unsupported_confirmed
+        ),
+        "count_reclassified_by_verification": len(reclassified),
+        "verification_stage_counts": dict(Counter(r.verification_stage for r in reclassified)),
+        "mis_cited_reference_count": sum(
+            1 for r in verified if r.verdict == AuditVerdict.UNSUPPORTED and r.corroborated_by_other_reference
+        ),
+    }
+
+
 def build_reference_stats(
     chunks: list[AnswerChunk], references: list[Reference], results: list[AuditResult]
 ) -> list[ReferenceStats]:
@@ -114,6 +132,7 @@ def aggregate_report(
     manualmente a partir do JSON bruto no audit_with_llm."""
     percentages = _verdict_percentages(results, total=len(chunks))
     counts = _verdict_counts(results)
+    verification = _verification_summary(results)
     cost = summarize_cost(results)
     skipped = skipped or []
     cost_tracked = (
@@ -135,6 +154,11 @@ def aggregate_report(
         count_unsupported=counts["count_unsupported"],
         count_contradicted=counts["count_contradicted"],
         count_skipped=len(skipped),
+        verification_ran=verification["verification_ran"],
+        count_unsupported_confirmed=verification["count_unsupported_confirmed"],
+        count_reclassified_by_verification=verification["count_reclassified_by_verification"],
+        verification_stage_counts=verification["verification_stage_counts"],
+        mis_cited_reference_count=verification["mis_cited_reference_count"],
         dead_references=[r for r in references if r.status == ReferenceStatus.DEAD],
         inaccessible_references=[r for r in references if r.status == ReferenceStatus.INACCESSIBLE],
         skipped_chunks=skipped,

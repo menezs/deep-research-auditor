@@ -59,6 +59,20 @@ class Report(BaseModel):
     count_contradicted: int = 0
     count_skipped: int = 0
 
+    # --- Cascata de verificacao de vereditos UNSUPPORTED ---
+    verification_ran: bool = False
+    count_unsupported_confirmed: int = 0
+    """UNSUPPORTED que sobreviveram a varredura do documento citado inteiro."""
+    count_reclassified_by_verification: int = 0
+    """Chunks cujo veredito inicial era UNSUPPORTED e a cascata reclassificou
+    para SUPPORTED/CONTRADICTED."""
+    verification_stage_counts: dict[str, int] = Field(default_factory=dict)
+    """Quantos vereditos finais vieram de cada etapa (`context_expansion`,
+    `full_doc_scan`, `cross_reference`)."""
+    mis_cited_reference_count: int = 0
+    """UNSUPPORTED corroborados por outra referencia baixada (provavel erro
+    de citacao)."""
+
     dead_references: list[Reference] = Field(default_factory=list)
     inaccessible_references: list[Reference] = Field(default_factory=list)
     skipped_chunks: list[SkippedChunk] = Field(default_factory=list)

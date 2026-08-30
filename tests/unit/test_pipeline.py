@@ -145,7 +145,7 @@ def test_build_pipeline_passes_configured_model_names_to_adapters(tmp_path: Path
     assert judging_stage.rerank_top_k == settings.rerank_top_k
 
 
-def test_build_pipeline_defaults_to_citation_scoped_retrieval(tmp_path: Path, monkeypatch):
+def test_build_pipeline_wires_five_stages_ending_in_judging_and_reporting(tmp_path: Path, monkeypatch):
     import auditframework.pipeline as pipeline_module
 
     monkeypatch.setattr(pipeline_module, "BGEEmbedder", _FakeEmbedder)
@@ -153,8 +153,8 @@ def test_build_pipeline_defaults_to_citation_scoped_retrieval(tmp_path: Path, mo
     monkeypatch.setattr(pipeline_module, "create_llm_client", lambda settings: _FakeLLMClient())
 
     settings = _settings(tmp_path)
-    assert build_pipeline(settings)._stages[3].full_corpus_mode is False
-    assert build_pipeline(settings, full_corpus_mode=True)._stages[3].full_corpus_mode is True
+    stages = build_pipeline(settings)._stages
+    assert [s.name for s in stages] == ["extraction", "ingestion", "indexing", "judging", "reporting"]
 
 
 class TestStripReferenceSection:

@@ -16,6 +16,7 @@ class VectorStore(Protocol):
         self, query_embedding: list[float], top_k: int, *, allowed_ids: set[int] | None = None
     ) -> list[tuple[ReferenceChunk, float]]: ...
     def embedding_ids_for_references(self, reference_ids: list[str]) -> set[int]: ...
+    def reference_chunks(self, reference_id: str) -> list[ReferenceChunk]: ...
     def save(self, index_path: Path, chunks_path: Path) -> None: ...
 
 
@@ -54,6 +55,15 @@ class FaissVectorStore:
     def embedding_ids_for_references(self, reference_ids: list[str]) -> set[int]:
         wanted = set(reference_ids)
         return {eid for eid, chunk in self._chunks.items() if chunk.reference_id in wanted}
+
+    def reference_chunks(self, reference_id: str) -> list[ReferenceChunk]:
+        """Todos os `ReferenceChunk` de uma referencia, em ordem de
+        documento (por `embedding_id`, que `build_index` atribui
+        sequencialmente por documento). Base para a expansao de contexto
+        por vizinhanca (Etapa A da verificacao)."""
+        chunks = [c for c in self._chunks.values() if c.reference_id == reference_id]
+        chunks.sort(key=lambda c: c.embedding_id)
+        return chunks
 
     def search(
         self, query_embedding: list[float], top_k: int, *, allowed_ids: set[int] | None = None

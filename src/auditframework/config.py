@@ -38,8 +38,15 @@ class Settings(BaseSettings):
     embedding_model: str = "BAAI/bge-m3"
     reranker_model: str = "BAAI/bge-reranker-v2-m3"
     model_cache_dir: Path = Path("./model_cache")
-    retrieval_top_k: int = 50
-    rerank_top_k: int = 20
+    retrieval_top_k: int = 30
+    rerank_top_k: int = 10
+
+    # Verificacao de vereditos UNSUPPORTED (cascata A -> B -> C; sempre ativa
+    # no `audit run`, sem flag). Ver `judging/verification/`.
+    verification_neighbor_window: int = 1
+    verification_rerank_top_k: int = 20
+    verification_full_doc_window_tokens: int = 6000
+    verification_full_doc_window_overlap: int = 300
 
     @property
     def runs_dir(self) -> Path:

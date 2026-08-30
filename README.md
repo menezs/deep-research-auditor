@@ -1,17 +1,16 @@
 # Deep Research Auditor
 
-Framework para auditar automaticamente se as respostas produzidas por
-ferramentas de Deep Research (ChatGPT, Gemini, Perplexity, etc.) sao
-realmente suportadas pelas referencias que elas citam.
+Framework que audita automaticamente se as respostas de ferramentas de Deep
+Research (ChatGPT, Gemini, Perplexity, ...) são sustentadas pelas referências
+que citam.
 
-O pipeline extrai as referencias citadas numa resposta, baixa e converte
-o conteudo citado, indexa esse conteudo, usa um LLM como juiz para
-classificar cada trecho da resposta como suportado/nao suportado/
-contraditado pelo contexto recuperado, e agrega tudo num relatorio final.
+Para cada trecho da resposta, o pipeline recupera o conteúdo da referência
+citada e usa um LLM como juiz para classificá-lo em **SUPPORTED**,
+**UNSUPPORTED** ou **CONTRADICTED**. Trechos julgados `UNSUPPORTED` passam por
+uma cascata de verificação (ver [Auditoria de vereditos UNSUPPORTED](#auditoria-de-vereditos-unsupported)).
+O resultado é um relatório `.md` + `.json`.
 
-## Arquitetura
-
-### Pipeline
+## Pipeline
 
 ```mermaid
 flowchart TD
@@ -19,329 +18,187 @@ flowchart TD
 
     subgraph EXT["extraction/"]
         IN -->|AnswerLoader| TXT["Texto bruto"]
-        TXT -->|"ReferenceExtractor<br/>(Regex ou LLM)"| REF["Reference<br/>id = hash(url normalizada)"]
+        TXT -->|"ReferenceExtractor (regex/LLM)"| REF["Reference<br/>id = hash(url)"]
     end
 
     subgraph ING["ingestion/"]
-        REF -->|"Fetcher (requests → cloudscraper → playwright)<br/>+ Converter (HTML/PDF → Markdown)"| DOC["Document<br/>+ Reference.status"]
+        REF -->|"Fetcher (Reddit→API .json; senão requests→cloudscraper→playwright)<br/>+ Converter → Markdown"| DOC["Document<br/>+ Reference.status"]
     end
 
     subgraph IDX["indexing/"]
         TXT -->|AnswerChunker| CHK["AnswerChunk<br/>cited_reference_ids"]
         DOC -->|"DocumentChunker + Embedder"| VS[("FaissVectorStore")]
-        CHK --> RET["Retriever"]
+        CHK --> RET["Retriever (escopado pela ref citada)"]
         VS --> RET
-        RET -->|"busca ESCOPADA pela<br/>referencia citada"| CUR["CuratedDocument"]
+        RET --> CUR["CuratedDocument"]
     end
 
     subgraph JUD["judging/"]
-        CUR -->|Verifier| RES["AuditResult<br/>verdict, custo, tokens"]
+        CUR -->|Verifier| V0{"veredito inicial"}
+        V0 -->|"SUPPORTED / CONTRADICTED"| RES["AuditResult"]
+        V0 -->|UNSUPPORTED| CASC["VerificationCascade<br/>A → B → C"]
+        CASC --> RES
     end
 
     subgraph REP["reporting/"]
-        RES -->|"aggregate_report + render"| OUT["Report<br/>.md / .json"]
+        RES -->|"aggregate + render"| OUT["Report .md / .json"]
     end
 ```
 
-Cada seta é uma função que recebe/devolve um modelo Pydantic — nunca um
-path de arquivo ou uma posição de lista como contrato implícito.
-`pipeline.py` orquestra os cinco estágios sobre esse contrato,
-persistindo cada etapa em `data/runs/<run_id>/` para permitir retomada
-(`audit resume`).
+Cada seta é uma função que recebe/devolve um modelo Pydantic — nunca um path ou
+posição de lista como contrato implícito. `pipeline.py` orquestra os 5 estágios
+e persiste cada etapa em `data/runs/<run_id>/`, permitindo retomada por
+`audit resume`.
 
-### Estrutura de diretórios
-
-```
-src/auditframework/
-├── cli.py             # audit run/resume/report/compare (Command)
-├── pipeline.py         # Pipeline + RunContext + 5 stages (DI)
-├── config.py           # Settings unico (pydantic-settings)
-├── logging_config.py
-├── models/             # contrato compartilhado (Pydantic)
-│   ├── reference.py    # Reference, ReferenceStatus
-│   ├── document.py     # Document
-│   ├── chunk.py        # AnswerChunk, ReferenceChunk
-│   ├── curated.py      # RetrievedPassage, CuratedDocument
-│   ├── audit_result.py # AuditVerdict, AuditResult, SkippedChunk
-│   └── report.py       # Report, JudgeConfig, ReferenceStats, ToolStats
-├── extraction/         # resposta -> Reference (extracao de citacoes)
-├── ingestion/          # Reference -> Document (download + conversao)
-├── indexing/           # chunking de documentos, embeddings, FAISS, retrieval
-├── judging/            # juiz LLM
-├── reporting/          # agregacao + render do relatorio final
-└── common/             # erros tipados, LLMClient compartilhado, pricing
-```
-
-### Padrões de projeto aplicados
-
-- **Command** — `cli.py`: `run`/`resume`/`report`/`compare` como subcomandos independentes (Typer).
-- **Pipeline + Dependency Injection** — `pipeline.py`: cada estágio recebe
-  suas dependências (Embedder, LLMClient, Fetcher) via construtor;
-  `build_pipeline()` resolve os adapters reais a partir do `Settings`.
-- **Strategy** — `AnswerLoader` (md/pdf/docx), `ReferenceExtractionStrategy`
-  (Regex ou LLM), `Fetcher`/conversores, `Embedder`/`VectorStore`/`LLMClient`.
-- **Adapter** — `FaissVectorStore` (sobre `faiss`), `BGEEmbedder`/`Reranker`
-  (sobre `sentence-transformers`), `OpenAICompatibleClient`/`AnthropicClient`
-  (sobre os SDKs de LLM).
-- **Repository** — `ReferenceRegistry` (persistência idempotente de
-  `Reference`/`Document`).
-- **Builder** — `ReportRenderer` (monta Markdown/JSON a partir do `Report`);
-  `Retriever._assemble_context` (monta o contexto curado preservando
-  proveniência por trecho).
-- **Chain of Responsibility** — `HttpFetcher`: `requests` → `cloudscraper`
-  → `playwright`.
-- **Factory** — `create_llm_client(settings)`, `build_pipeline(settings)`.
-- **Erros tipados** — hierarquia em `common/errors.py`
-  (`DeadReferenceError`, `InaccessibleReferenceError`, `LLMParseError`,
-  `LLMProviderError`, ...), cada situação de falha vira um tipo explícito
-  em vez de casamento de substring em texto de erro livre.
-
-### Contrato de dados (resumo)
-
-`Reference` (id estável por hash de URL) → `Document` (conteúdo baixado)
-→ `AnswerChunk`/`ReferenceChunk` (chunking) → `CuratedDocument` (contexto
-recuperado e escopado — ou `skip_reason` setado quando não há evidência
-citada disponível, ver `--full-corpus` abaixo) → `AuditResult` (veredito do
-juiz — apenas `SUPPORTED`/`UNSUPPORTED`/`CONTRADICTED`; uma falha de
-parsing da saída do LLM juiz nunca é coagida silenciosamente para um
-desses vereditos — o chunk é pulado com um aviso e fica pendente para uma
-próxima `audit resume`, sem derrubar o restante do run) / `SkippedChunk`
-(chunk não julgado por falta de evidência citada, com justificativa) →
-`Report` (agregação final, incluindo o `JudgeConfig` — modelo/provider/
-parâmetros do LLM juiz usados na run). Definições completas em
-`src/auditframework/models/`.
-
-## Instalacao (desenvolvimento)
+## Instalação
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
+python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev,ingestion,indexing,judging]"
-python -m playwright install chromium  # necessario apenas para o fallback de scraping
+python -m playwright install chromium   # fallback de scraping
 cp .env.example .env
 ```
 
-Os extras podem ser instalados seletivamente conforme o uso pretendido:
+Extras instaláveis seletivamente: `ingestion` (download/conversão de
+referências), `indexing` (embeddings + reranking + FAISS), `judging` (juiz
+LLM local/OpenAI/Anthropic), `dev` (testes).
 
-| Extra | O que habilita | Dependencias principais |
+## Configuração
+
+Tudo via `.env` — ver `.env.example` para a lista completa e comentada.
+Principais variáveis:
+
+| Variável | Padrão | Função |
 |---|---|---|
-| `ingestion` | download/conversao de referencias (PDF, DOCX, scraping) | `requests`, `cloudscraper`, `playwright`, `trafilatura`, `pymupdf4llm`, `python-docx` |
-| `indexing` | embeddings, reranking e indice FAISS | `sentence-transformers`, `faiss-cpu`, `semantic-text-splitter`, `tiktoken` |
-| `judging` | juiz LLM (local/OpenAI/Anthropic) | `openai`, `anthropic` |
-| `dev` | rodar a suite de testes | `pytest`, `pytest-cov` |
+| `LLM_PROVIDER` | `local` | `local` / `openai` / `anthropic` / `ollama` |
+| `LLM_MODEL`, `LLM_BASE_URL` | — | modelo e endpoint do juiz (e da extração via LLM) |
+| `EMBEDDING_MODEL` | `BAAI/bge-m3` | modelo de embeddings |
+| `RERANKER_MODEL` | `BAAI/bge-reranker-v2-m3` | cross-encoder de reranking |
+| `RETRIEVAL_TOP_K` / `RERANK_TOP_K` | `50` / `20` | candidatos recuperados / reordenados |
+| `VERIFICATION_*` | — | parâmetros da cascata de UNSUPPORTED (ver abaixo) |
 
 ## Uso
 
-Toda configuração (provider de LLM, modelos de embedding/reranking,
-diretórios, top-k de recuperação, retries/timeout) é feita via `.env` —
-ver `.env.example` para a lista completa e comentada de variáveis.
+| Comando | O que faz |
+|---|---|
+| `audit run RESPOSTA [--tool NOME]` | roda o pipeline completo |
+| `audit resume RUN_ID` | retoma do último estágio/chunk concluído |
+| `audit report RUN_ID` | reimprime o `report.md` de uma run concluída |
+| `audit compare RUN_ID [RUN_ID ...]` | compara o % de vereditos entre execuções |
 
-### `audit run` — executa o pipeline completo
+`--tool` (padrão `unknown`) é apenas metadado do relatório. O `run_id` é
+derivado deterministicamente do hash do conteúdo do arquivo + timestamp.
+`audit resume` pula por inteiro estágios já persistidos e, dentro do
+julgamento, pula chunk a chunk os que já têm resultado — nada é refeito.
 
-```bash
-audit run RESPOSTA [--tool NOME_DA_FERRAMENTA] [--full-corpus]
-```
+### Formatos de entrada
 
-- `RESPOSTA` (obrigatório): caminho para o arquivo de resposta a ser
-  auditado (ver formatos suportados abaixo).
-- `--tool` (opcional, padrão `unknown`): nome da ferramenta de Deep
-  Research que gerou a resposta (`ChatGPT`, `Gemini`, `Perplexity`, ...)
-  — usado como metadado no relatório final, não afeta o processamento.
-- `--full-corpus` (opcional, padrão desligado): controla como o
-  `CuratedDocument` de cada chunk é montado.
-  - **Desligado (padrão)**: a busca é escopada só pelas referências que o
-    chunk efetivamente cita. Se o chunk não cita nenhuma referência, ou a
-    referência citada não pôde ser baixada (morta/inacessível), esse
-    chunk **não é julgado** — fica registrado em `skipped_chunks.jsonl`
-    com uma justificativa, contabilizado no relatório (`SKIPPED`), e o
-    resto da auditoria continua normalmente.
-  - **Ligado**: ignora a citação e monta o contexto buscando no corpus
-    inteiro (reflete que um Deep Research tipicamente usa todo o
-    conhecimento que encontrou, não só o que citou explicitamente) —
-    nesse modo nenhum chunk é pulado por falta de evidência citada.
+`.md` / `.markdown` (instalação base); `.pdf` e `.docx` (extra `[ingestion]`).
+O arquivo é normalizado para markdown e precisa:
 
-  A flag é fixada para toda a execução (persistida em
-  `run_meta.json`) — `audit resume` sempre usa o mesmo modo com que a run
-  começou, sem precisar (nem poder) ser passada de novo.
+1. **citar as fontes no corpo** com marcadores `[N]` (superscript em `.docx` é
+   convertido automaticamente para `[N]`);
+2. **terminar com uma lista de referências**.
 
-Roda extraction → ingestion → indexing → judging → reporting e persiste
-tudo em `data/runs/<run_id>/` (`run_id` derivado deterministicamente do
-conteúdo do arquivo de entrada + timestamp).
+`RegexReferenceExtractor` reconhece, em ordem: marcador `[N] título` + URL
+(ChatGPT/Gemini), lista numerada após o separador `⁂` ou o cabeçalho da seção
+de fontes (Perplexity/Gemini), e lista sem marcação nenhuma (marcador inferido
+pela ordem de ocorrência, comum em `.docx`). Para respostas fora desses
+formatos existe `LLMReferenceExtractor` (uso programático).
 
-```bash
-audit run respostas/gemini_direito.md --tool Gemini
-```
+## Recuperação de contexto
 
-### `audit resume` — retoma uma execução interrompida
+A recuperação é **sempre escopada às referências que o chunk cita**. Se o chunk
+não cita nenhuma referência, ou a referência citada não pôde ser baixada
+(morta/inacessível), o chunk **não é julgado**: vira `SKIPPED` no relatório com
+justificativa e a auditoria continua. A busca no corpus inteiro acontece apenas
+na Etapa C da verificação, abaixo.
 
-```bash
-audit resume RUN_ID
-```
+## Auditoria de vereditos UNSUPPORTED
 
-Retoma a partir do último estágio concluído — útil após uma interrupção
-(crash, timeout do provedor de LLM, queda de conectividade). Estágios já
-persistidos (`extraction`, `ingestion`, `indexing`) são pulados por
-inteiro; dentro do estágio de julgamento, cada chunk que já tem um
-`AuditResult` persistido em `audit_results.jsonl` também é pulado
-individualmente — nenhum trabalho já feito é refeito.
+Um `UNSUPPORTED` do juiz inicial **não é o veredito final**. Todo chunk marcado
+`UNSUPPORTED` passa por uma cascata de 3 etapas (`judging/verification/`),
+**sempre ativa**, que **para na primeira etapa que muda o veredito**.
 
-```bash
-audit resume gemini_direito_a1b2c3_20260801T120000Z
-```
+**A — Expansão de contexto.** Refaz a recuperação na referência citada com um
+`rerank_top_k` maior e anexa os trechos vizinhos de cada acerto, remontando o
+contexto em ordem de documento. Re-julga. Resolve o caso em que o fato ficou na
+fronteira de um chunk de 512 tokens ou logo fora da janela de rerank.
 
-### `audit report` — reimprime um relatório já gerado
+**B — Varredura do documento citado inteiro.** Sem recuperação: lê o markdown
+completo de cada referência citada, fatia em janelas grandes e pergunta ao
+juiz, janela a janela, se ela sustenta / contradiz / não trata o claim.
+Encontrou suporte → `SUPPORTED`. Encontrou contradição → `CONTRADICTED`. Nada em
+nenhuma janela → o `UNSUPPORTED` fica **confirmado** (`unsupported_confirmed`):
+o claim comprovadamente não está na fonte citada.
 
-```bash
-audit report RUN_ID
-```
+**C — Checagem cruzada no corpus.** Busca evidência em **todas** as referências
+baixadas — único ponto do pipeline que ignora a citação. **Nunca** reclassifica
+para `SUPPORTED`: a auditoria é sobre a fonte citada. Apenas anota se outra
+referência sustenta (`corroborated_by_other_reference`) ou contradiz
+(`contradicted_by_other_reference`) o claim — sinal de citação trocada.
 
-Imprime no terminal o `report.md` de uma execução já concluída, sem
-reprocessar nada. Falha com uma mensagem clara (sugerindo `audit
-resume`) se a execução ainda não chegou ao estágio de reporting.
+O `AuditResult` final carrega `verification_stage` (etapa que produziu o
+veredito), `unsupported_confirmed`, as anotações de corroboração e
+`verification_trail` (trilha completa). O custo/tokens das chamadas de LLM
+extras são somados no próprio `AuditResult`.
 
-### `audit compare` — compara múltiplas execuções
+Parâmetros em `.env`: `VERIFICATION_NEIGHBOR_WINDOW` (1),
+`VERIFICATION_RERANK_TOP_K` (40), `VERIFICATION_FULL_DOC_WINDOW_TOKENS` (6000),
+`VERIFICATION_FULL_DOC_WINDOW_OVERLAP` (300).
 
-```bash
-audit compare RUN_ID [RUN_ID ...]
-```
+## Relatório
 
-Compara, lado a lado, o percentual de SUPPORTED/UNSUPPORTED/
-CONTRADICTED de duas ou mais execuções já
-julgadas — útil para comparar respostas de ferramentas diferentes sobre
-o mesmo tema, ou a mesma resposta auditada por LLMs juízes diferentes.
+Cada run gera `data/runs/<run_id>/report.md` (legível) e `report.json` (mesmos
+dados). Seções — numeração dinâmica, as condicionais são omitidas quando não se
+aplicam:
 
-```bash
-audit compare chatgpt_direito_a1b2c3_... gemini_direito_d4e5f6_...
-```
-
-### Formatos de arquivo de entrada suportados
-
-| Formato | Extensões | Requisito |
-|---|---|---|
-| Markdown | `.md`, `.markdown` | nenhum (instalação base) |
-| PDF | `.pdf` | extra `[ingestion]` (via `pymupdf4llm`) |
-| Word | `.docx` | extra `[ingestion]` (via `python-docx`) |
-
-A resposta de entrada precisa conter, ao final, uma lista de referências
-no formato tipicamente produzido por ChatGPT/Gemini/Perplexity
-(marcadores `[N]` seguidos de título e URL, na mesma linha ou na
-seguinte) para que a extração padrão por regex (`RegexReferenceExtractor`)
-funcione. Para respostas cuja lista de fontes não segue esse formato,
-existe `LLMReferenceExtractor` (`extraction/reference_extractor.py`),
-que usa o mesmo `LLMClient` do estágio de julgamento — hoje disponível
-para uso programático (`Pipeline`/`ExtractionStage` aceitam qualquer
-`ReferenceExtractionStrategy` via construtor), sem uma flag de CLI
-dedicada ainda.
-
-Independente do formato de arquivo (`.md`/`.pdf`/`.docx`), o texto é
-primeiro normalizado para markdown (`extraction/loaders.py`) e só depois
-passa pelas mesmas regras de extração — `.md` é lido como está, `.pdf` é
-convertido via `pymupdf4llm`, `.docx` é reconstruído parágrafo a parágrafo
-via `python-docx` (preservando números sobrescritos como marcadores
-`[N]` e estilos `Heading N` como `#`/`##`/...). O corpo da resposta
-(as afirmações a auditar) também deve citar essas referências no mesmo
-formato `[N]`, para que cada `AnswerChunk` seja associado à sua evidência.
-
-`RegexReferenceExtractor.extract` tenta, em ordem, 3 formatos de lista de
-fontes (os dois primeiros combinados, o terceiro só como último recurso):
-
-**1) Marcador `[N]` entre colchetes** (ChatGPT/Gemini, `.md` ou `.pdf`) —
-título e URL na mesma linha ou na seguinte, com um ou mais marcadores
-apontando para a mesma URL:
-
-```markdown
-Corpo da resposta com uma afirmação citando a fonte [1][2].
-
-## Referências
-
-[1] Nome do Artigo ou Página
-https://exemplo.com/artigo
-
-[2] [5] Outro Documento Citado Duas Vezes
-https://exemplo.com/outro-documento
-```
-
-**2) Lista numerada sem colchetes, após o separador `⁂` (Perplexity) ou
-após o cabeçalho da seção** (`.pdf`, tipicamente com a URL sublinhada em
-`<u>...</u>` pelo conversor) — Perplexity ancora pelo `⁂`, Gemini pelo
-cabeçalho da seção de fontes:
-
-```markdown
-Corpo da resposta com uma afirmação citada [1].
-
-⁂
-
-1. <u>https://exemplo.com/artigo</u>
-2. <u>https://exemplo.com/outro-documento</u>
-```
-
-```markdown
-### **Referências citadas**
-
-1. Nome do Artigo, <u>https://exemplo.com/artigo</u>
-2. Outro Documento, <u>https://exemplo.com/outro-documento</u>
-```
-
-**3) Sem marcação nenhuma** (comum em `.docx`, quando o conversor já
-resolve o hyperlink do Word como URL em texto puro) — usado só quando os
-dois formatos acima não encontram nada. Marcador `[N]` é inferido pela
-ORDEM de ocorrência na lista:
-
-```markdown
-Corpo da resposta com uma afirmação citada [1].
-
-⁂
-
-https://exemplo.com/artigo
-https://exemplo.com/outro-documento
-```
-
-```markdown
-## Referências
-
-Nome do Artigo, https://exemplo.com/artigo
-Outro Documento, https://exemplo.com/outro-documento
-```
-
-Em `.docx`, uma citação no corpo do texto normalmente aparece como um
-número sobrescrito (superscript) — o loader converte isso automaticamente
-para `[N]`, então o efeito no texto extraído é o mesmo dos exemplos
-acima. Tabelas dentro do `.docx` também são convertidas (uma célula por
-bloco de texto), preservando marcadores de citação dentro delas.
-
-## Relatório final
-
-Cada run gera, em `data/runs/<run_id>/`, `report.md` (legível) e
-`report.json` (mesmos dados, para consumo programático). Seções do
-`report.md`, nesta ordem — as condicionais (5 e 6) são omitidas quando
-não se aplicam e a numeração é reatribuída sequencialmente, sem deixar
-buracos:
-
-1. **Metadados da Execução** — run id, ferramenta, tempo de
-   processamento (formato `dias:horas:min:seg`) e o modelo/provider/
-   parâmetros (`temperature`, `max_retries`, `retry_delay`, `base_url`
-   quando aplicável) do LLM juiz usado nessa run — persistido para
-   consulta posterior, mesmo que a configuração (`.env`) mude depois. O
-   cabeçalho do relatório também traz o caminho do arquivo auditado (o
-   passado ao comando `audit`).
-2. **Distribuição de Vereditos** — contagem e percentual de
+1. **Metadados** — run id, ferramenta, arquivo auditado, tempo de processamento
+   (`dias:horas:min:seg`), modelo/provider/parâmetros do juiz usados na run.
+2. **Distribuição de Vereditos** — contagem e % de
    SUPPORTED/UNSUPPORTED/CONTRADICTED (e SKIPPED, quando houver).
-3. **Custo e Uso de Tokens** — custo total estimado, tokens totais e
-   médias por requisição ao juiz. Quando o provider/modelo do juiz não
-   tem tabela de preços neste framework (ex: `openai`), a seção abre com
-   um aviso de que o custo não foi contabilizado — os valores são um
-   piso, não o custo real (só `anthropic` com modelo tabelado e execução
-   local são contabilizados).
-4. **Análise por Referência** — tabela por referência citada (status,
-   número de citações, distribuição de veredito), incluindo quantas e
-   qual percentual das referências extraídas não foram citadas por
-   nenhum chunk julgado.
-5. **Referências Mortas e Inacessíveis** — referências com HTTP 404 ou
-   inacessíveis (403/timeout/SSL) após esgotar as estratégias de fetch.
-6. **Exemplos Representativos por Veredito** — até 3 exemplos por
-   veredito, com o trecho da resposta e a justificativa do juiz.
-7. **Chunks Não Auditados** — chunks pulados (sem evidência citada
-   disponível) e o motivo.
+3. **Verificação de UNSUPPORTED** — quantos `UNSUPPORTED` iniciais foram
+   **confirmados**, quantos foram **reclassificados** (por etapa) e quantos são
+   **provável erro de citação** (corroborados por outra referência).
+4. **Custo e Tokens** — total e médias por requisição. Quando o provider não tem
+   tabela de preços (ex: `openai`), a seção avisa que o custo é um piso, não o
+   valor real (só `anthropic` com modelo tabelado e execução local são
+   contabilizados).
+5. **Análise por Referência** — status, nº de citações e distribuição de
+   veredito por referência; quantas referências nunca foram citadas.
+6. **Referências Mortas e Inacessíveis** — HTTP 404 e 403/timeout/SSL após
+   esgotar as estratégias de fetch.
+7. **Exemplos por Veredito** — até 3 por veredito, com trecho + justificativa;
+   para `UNSUPPORTED`, também a linha de verificação (confirmado ou não, trilha).
+8. **Chunks Não Auditados** — chunks pulados e o motivo.
+
+## Estrutura
+
+```
+src/auditframework/
+├── cli.py            # audit run / resume / report / compare
+├── pipeline.py       # Pipeline + RunContext + 5 estágios
+├── config.py         # Settings (pydantic-settings, lê .env)
+├── models/           # contrato Pydantic compartilhado
+├── extraction/       # resposta → Reference (extração de citações)
+├── ingestion/        # Reference → Document (download + conversão; Reddit via API .json)
+├── indexing/         # chunking de documentos, embeddings, FAISS, retrieval
+├── judging/          # juiz LLM
+│   └── verification/ # cascata A → B → C sobre vereditos UNSUPPORTED
+├── reporting/        # agregação + render do relatório final
+└── common/           # erros tipados, LLMClient compartilhado, pricing
+```
+
+**Contrato de dados:** `Reference` (id = hash da URL normalizada) → `Document`
+→ `AnswerChunk` / `ReferenceChunk` → `CuratedDocument` → `AuditResult` (+ cascata)
+/ `SkippedChunk` → `Report`. Uma falha de parsing da saída do juiz nunca é
+coagida para um veredito — o chunk fica pendente para a próxima `audit resume`.
+
+**Padrões aplicados:** Pipeline + Dependency Injection, Strategy (loaders,
+extractors, fetcher, embedder/reranker/LLMClient), Adapter (FAISS,
+sentence-transformers, SDKs de LLM), Chain of Responsibility (`HttpFetcher`,
+`VerificationCascade`), Repository (`ReferenceRegistry`), Factory
+(`build_pipeline`, `create_llm_client`), erros tipados em `common/errors.py`.
 
 ## Testes
 

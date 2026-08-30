@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass
 from urllib.parse import urlsplit, urlunsplit
@@ -7,6 +8,9 @@ from urllib.parse import urlsplit, urlunsplit
 import requests
 
 from ..common.errors import DeadReferenceError, InaccessibleReferenceError
+from ..logging_config import get_logger
+
+logger = get_logger(__name__)
 
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -18,19 +22,32 @@ _HEADERS = {
     "Accept-Language": "en-US,en;q=0.9,pt-BR;q=0.8,pt;q=0.7",
 }
 
-_REDDIT_HOSTS = {"reddit.com", "www.reddit.com"}
+_REDDIT_HOST_RE = re.compile(r"(?:^|\.)reddit\.com$", re.IGNORECASE)
+_REDDIT_THREAD_PATH_RE = re.compile(r"^/r/[^/]+/comments/[a-z0-9]+", re.IGNORECASE)
+_REDDIT_JSON_HEADERS = {
+    "User-Agent": "auditframework/0.1 (deep-research reference auditor)",
+    "Accept": "application/json",
+}
 
 
-def _rewrite_known_hosts(url: str) -> str:
-    """Reddit exige um desafio JS de verificacao em `www.reddit.com` que o
-    Playwright headless nunca resolve (fica em polling ate estourar o
-    timeout de `networkidle`). `old.reddit.com` serve o mesmo conteudo sem
-    esse desafio."""
+def _reddit_thread_json_url(url: str) -> str | None:
+    """Para uma URL de *thread* do Reddit (`/r/<sub>/comments/<id>/...`),
+    devolve a mesma URL apontando para o endpoint JSON publico (sufixo
+    `.json` antes da query string) — que serve o post e os comentarios
+    ja estruturados, sem o desafio JS que faz o scraper de HTML extrair a
+    sidebar de regras do subreddit em vez do conteudo real da discussao.
+
+    `None` para qualquer outra URL, incluindo URLs do Reddit que NAO sao
+    thread (subreddit raiz, perfil, wiki) — essas seguem o fluxo normal."""
     parts = urlsplit(url)
-    if parts.netloc in _REDDIT_HOSTS:
-        parts = parts._replace(netloc="old.reddit.com")
-        return urlunsplit(parts)
-    return url
+    if not _REDDIT_HOST_RE.search(parts.netloc):
+        return None
+    if not _REDDIT_THREAD_PATH_RE.match(parts.path):
+        return None
+    path = parts.path.rstrip("/")
+    if not path.endswith(".json"):
+        path = f"{path}.json"
+    return urlunsplit((parts.scheme or "https", parts.netloc, path, parts.query, ""))
 
 
 def _is_pdf_url(url: str) -> bool:
@@ -69,7 +86,16 @@ class HttpFetcher:
         self.backoff = backoff
 
     def fetch(self, url: str) -> FetchResult:
-        url = _rewrite_known_hosts(url)
+        reddit_json_url = _reddit_thread_json_url(url)
+        if reddit_json_url is not None:
+            try:
+                return self._fetch_reddit_json(reddit_json_url)
+            except Exception as exc:  # qualquer falha no endpoint JSON -> tenta o HTML normal
+                logger.warning(
+                    "Falha ao obter thread do Reddit via JSON (%s); caindo para o fluxo HTML: %s",
+                    reddit_json_url,
+                    exc,
+                )
         try:
             return self._fetch_once(url)
         except DeadReferenceError:
@@ -135,6 +161,32 @@ class HttpFetcher:
             content_type="text/html",
             fetch_method="playwright",
             http_status=200,
+        )
+
+    def _fetch_reddit_json(self, json_url: str) -> FetchResult:
+        """Baixa a thread do Reddit pelo endpoint JSON publico. Usa um
+        User-Agent descritivo (o Reddit bloqueia UAs genericos de bot com
+        429) e nao passa por cloudscraper/playwright — o endpoint e JSON
+        estatico."""
+        try:
+            response = requests.get(
+                json_url, headers=_REDDIT_JSON_HEADERS, timeout=self.timeout, allow_redirects=True
+            )
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+            raise InaccessibleReferenceError(f"Falha ao conectar em {json_url}: {exc}") from exc
+
+        if response.status_code == 404:
+            raise DeadReferenceError(f"Thread do Reddit nao encontrada (404): {json_url}")
+        if response.status_code == 429:
+            raise InaccessibleReferenceError(f"Rate limit no Reddit: {json_url}")
+        if response.status_code >= 400:
+            raise InaccessibleReferenceError(f"HTTP {response.status_code} em {json_url}")
+
+        return FetchResult(
+            content=response.content,
+            content_type="application/json",
+            fetch_method="reddit_json",
+            http_status=response.status_code,
         )
 
     def _get(self, url: str, *, verify: bool, attempt: int = 0) -> FetchResult:

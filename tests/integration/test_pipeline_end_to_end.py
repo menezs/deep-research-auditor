@@ -344,8 +344,8 @@ def test_chunk_with_unparseable_judge_output_is_skipped_without_crashing_the_run
 
 
 def test_chunk_citing_a_dead_reference_is_skipped_not_judged(tmp_path, embedder, llm_client):
-    """Regressao: no modo padrao (escopado por citacao), um chunk cuja
-    unica referencia citada nao pode ser baixada nao deve ser julgado
+    """Regressao: a recuperacao e sempre escopada por citacao — um chunk
+    cuja unica referencia citada nao pode ser baixada nao deve ser julgado
     contra evidencia de outra fonte que ele nunca citou — deve ser
     registrado em `skipped_chunks.jsonl` com justificativa, sem chamar o
     LLM, e contabilizado no report."""
@@ -421,35 +421,103 @@ def test_resume_does_not_reprocess_an_already_skipped_chunk(tmp_path, embedder, 
     assert len(llm_client.calls) == 1  # o juiz nao foi chamado de novo
 
 
-def test_full_corpus_mode_never_skips_even_with_a_dead_cited_reference(tmp_path, embedder, llm_client):
-    """No modo `full_corpus_mode`, a citacao e ignorada — mesmo um chunk
-    cuja referencia citada esta morta deve ser julgado, usando o corpus
-    inteiro (que ainda tem a outra referencia baixada) como evidencia."""
+class _SchemaAwareLLM:
+    """Como `FakeLLMClient`, mas roteia pela `schema` — necessario porque a
+    cascata de verificacao usa `WindowAssessment` (Etapa B) alem de
+    `JudgeOutput`."""
+
+    model = "fake-judge"
+
+    def __init__(self, judge_by_keyword: dict, window_verdict_by_keyword: dict):
+        self._judge = judge_by_keyword
+        self._window = window_verdict_by_keyword
+        self.calls: list[str] = []
+
+    def complete_json(self, *, system_message: str, user_prompt: str, schema):
+        self.calls.append(schema.__name__)
+        usage = LLMUsage(prompt_tokens=42, completion_tokens=8, latency_ms=5, cost_usd=0.0001)
+        if schema.__name__ == "WindowAssessment":
+            relation = "not_addressed"
+            for keyword, rel in self._window.items():
+                if keyword in user_prompt:
+                    relation = rel
+                    break
+            return schema(relation=relation, justification="janela", cited_excerpts=[]), usage
+        for keyword, output in self._judge.items():
+            if keyword in user_prompt:
+                return output, usage
+        raise AssertionError(f"nenhum fake de juiz para: {user_prompt!r}")
+
+
+def test_pipeline_reclassifies_unsupported_via_full_document_scan(tmp_path, fetcher, embedder):
     answer_path = tmp_path / "answer.md"
     answer_path.write_text(_ANSWER_MD, encoding="utf-8")
     settings, ctx = _make_ctx(tmp_path, answer_path)
-    ctx.full_corpus_mode = True
     save_run_meta(ctx)
 
-    fetcher = FakeFetcher(
-        {
-            _LGPD_URL: FetchResult(content=_LGPD_HTML.encode("utf-8"), content_type="text/html", fetch_method="requests", http_status=200),
-            _MARCO_CIVIL_URL: DeadReferenceError("404"),
-        }
+    llm = _SchemaAwareLLM(
+        judge_by_keyword={
+            "LGPD estabelece bases legais": JudgeOutput(
+                verdict="supported", justification="ok", cited_excerpts=[]
+            ),
+            "Marco Civil da Internet garante neutralidade": JudgeOutput(
+                verdict="unsupported", justification="recuperacao inicial nao trouxe evidencia", cited_excerpts=[]
+            ),
+        },
+        # a Etapa B varre o documento citado inteiro e encontra o suporte
+        window_verdict_by_keyword={"isonomico": "supports"},
     )
 
-    pipeline = Pipeline(settings)
-    pipeline.add_stage(ExtractionStage())
-    pipeline.add_stage(IngestionStage(fetcher=fetcher))
-    pipeline.add_stage(IndexingStage(embedder))
-    pipeline.add_stage(JudgingStage(llm_client, embedder, reranker=None, top_k=5, rerank_top_k=5, full_corpus_mode=True))
-    pipeline.add_stage(ReportingStage())
-    pipeline.run(ctx)
+    _build_pipeline(settings, fetcher, embedder, llm).run(ctx)
 
-    skipped_path = ctx.run_dir / "skipped_chunks.jsonl"
-    assert not skipped_path.exists() or skipped_path.read_text(encoding="utf-8").strip() == ""
-    results = (ctx.run_dir / "audit_results.jsonl").read_text(encoding="utf-8").splitlines()
-    assert len(results) == 2
+    results = {
+        json.loads(line)["answer_chunk_id"]: json.loads(line)
+        for line in (ctx.run_dir / "audit_results.jsonl").read_text(encoding="utf-8").splitlines()
+    }
+    reclassified = [r for r in results.values() if r["verification_stage"] != "baseline"]
+    assert len(reclassified) == 1
+    r = reclassified[0]
+    assert r["verdict"] == "supported"
+    assert r["verification_stage"] == "full_doc_scan"
+    assert [s["stage"] for s in r["verification_trail"]] == ["baseline", "context_expansion", "full_doc_scan"]
+    assert "WindowAssessment" in llm.calls
 
     report = json.loads((ctx.run_dir / "report.json").read_text(encoding="utf-8"))
-    assert report["count_skipped"] == 0
+    assert report["verification_ran"] is True
+    assert report["count_reclassified_by_verification"] == 1
+
+    report_md = (ctx.run_dir / "report.md").read_text(encoding="utf-8")
+    assert "Verificação de UNSUPPORTED" in report_md
+
+
+def test_pipeline_confirms_a_genuinely_unsupported_chunk(tmp_path, fetcher, embedder):
+    answer_path = tmp_path / "answer.md"
+    answer_path.write_text(_ANSWER_MD, encoding="utf-8")
+    settings, ctx = _make_ctx(tmp_path, answer_path)
+    save_run_meta(ctx)
+
+    llm = _SchemaAwareLLM(
+        judge_by_keyword={
+            "LGPD estabelece bases legais": JudgeOutput(verdict="supported", justification="ok", cited_excerpts=[]),
+            "Marco Civil da Internet garante neutralidade": JudgeOutput(
+                verdict="unsupported", justification="sem evidencia", cited_excerpts=[]
+            ),
+        },
+        window_verdict_by_keyword={},  # nenhuma janela sustenta -> UNSUPPORTED confirmado
+    )
+
+    _build_pipeline(settings, fetcher, embedder, llm).run(ctx)
+
+    results = {
+        json.loads(line)["answer_chunk_id"]: json.loads(line)
+        for line in (ctx.run_dir / "audit_results.jsonl").read_text(encoding="utf-8").splitlines()
+    }
+    confirmed = [r for r in results.values() if r["unsupported_confirmed"]]
+    assert len(confirmed) == 1
+    assert confirmed[0]["verdict"] == "unsupported"
+    assert [s["stage"] for s in confirmed[0]["verification_trail"]] == [
+        "baseline", "context_expansion", "full_doc_scan", "cross_reference",
+    ]
+
+    report = json.loads((ctx.run_dir / "report.json").read_text(encoding="utf-8"))
+    assert report["count_unsupported_confirmed"] == 1

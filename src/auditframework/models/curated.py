@@ -20,7 +20,6 @@ class CuratedDocument(BaseModel):
     passages: list[RetrievedPassage] = Field(default_factory=list)
     assembled_context: str
     skip_reason: str | None = None
-    """Nao-None quando o chunk nao deve ser submetido ao juiz LLM: no modo
-    de recuperacao escopado por citacao (padrao), a(s) referencia(s)
-    citada(s) pelo chunk nao tem conteudo indexado (nao baixada(s)/
-    inacessivel(is)) ou o chunk nao cita nenhuma referencia."""
+    """Nao-None quando o chunk nao deve ser submetido ao juiz LLM: o chunk
+    nao cita nenhuma referencia, ou a(s) referencia(s) citada(s) nao tem
+    conteudo indexado (nao baixada(s)/inacessivel(is))."""

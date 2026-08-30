@@ -88,3 +88,44 @@ def test_pdf_detected_by_url_suffix_even_without_content_type():
     markdown = convert_to_markdown(pdf_bytes, "", "https://example.com/arquivo.pdf")
 
     assert "conteudo do pdf" in markdown
+
+
+class TestRedditJson:
+    _URL = "https://www.reddit.com/r/marvelstudios/comments/1edvya8/title/"
+
+    def _payload(self) -> bytes:
+        import json
+
+        data = [
+            {"data": {"children": [{"kind": "t3", "data": {
+                "title": "Deadpool & Wolverine crossed $30B",
+                "author": "op", "score": 321, "selftext": "Corpo do post original.",
+            }}]}},
+            {"data": {"children": [
+                {"kind": "t1", "data": {"author": "alice", "score": 40,
+                 "body": "Deadpool & Wolverine fez $1.338B mundial",
+                 "replies": {"data": {"children": [
+                     {"kind": "t1", "data": {"author": "bob", "score": 3, "body": "resposta aninhada"}},
+                 ]}}}},
+                {"kind": "more", "data": {"count": 12}},
+            ]}},
+        ]
+        return json.dumps(data).encode("utf-8")
+
+    def test_json_thread_is_rendered_with_post_and_comments(self):
+        markdown = convert_to_markdown(self._payload(), "application/json; charset=utf-8", self._URL)
+        assert "# Deadpool & Wolverine crossed $30B" in markdown
+        assert "Corpo do post original." in markdown
+        assert "## Comentários" in markdown
+        assert "u/alice" in markdown and "$1.338B" in markdown
+        assert "resposta aninhada" in markdown  # 1 nivel de reply
+
+    def test_non_thread_reddit_json_is_not_treated_as_reddit(self):
+        # URL de subreddit raiz -> nao casa _reddit_thread_json_url -> nao entra no ramo Reddit
+        from auditframework.ingestion.converters import is_reddit_json
+
+        assert is_reddit_json("application/json", "https://www.reddit.com/r/marvelstudios/") is False
+
+    def test_malformed_reddit_json_raises_extraction_error(self):
+        with pytest.raises(ExtractionError):
+            convert_to_markdown(b'{"not": "a reddit listing"}', "application/json", self._URL)

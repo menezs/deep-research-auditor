@@ -157,3 +157,44 @@ def test_403_falls_back_to_cloudscraper_then_playwright(mock_get, mock_playwrigh
 
     assert result.fetch_method == "playwright"
     mock_playwright.assert_called_once_with("https://protegido.example.com")
+
+
+class TestRedditJson:
+    from auditframework.ingestion.fetcher import _reddit_thread_json_url as _fn
+
+    def test_thread_url_maps_to_json_endpoint(self):
+        from auditframework.ingestion.fetcher import _reddit_thread_json_url
+
+        assert _reddit_thread_json_url(
+            "https://www.reddit.com/r/x/comments/abc123/some_title/"
+        ) == "https://www.reddit.com/r/x/comments/abc123/some_title.json"
+        assert _reddit_thread_json_url(
+            "https://old.reddit.com/r/x/comments/abc123/t?foo=1"
+        ) == "https://old.reddit.com/r/x/comments/abc123/t.json?foo=1"
+
+    def test_non_thread_reddit_and_other_hosts_return_none(self):
+        from auditframework.ingestion.fetcher import _reddit_thread_json_url
+
+        assert _reddit_thread_json_url("https://www.reddit.com/r/x/") is None
+        assert _reddit_thread_json_url("https://www.reddit.com/user/foo") is None
+        assert _reddit_thread_json_url("https://en.wikipedia.org/wiki/X") is None
+
+    @patch("auditframework.ingestion.fetcher.requests.get")
+    def test_fetch_uses_json_endpoint_for_reddit_threads(self, mock_get):
+        mock_get.return_value = _response(200, b'[{}]', {"Content-Type": "application/json"})
+        result = HttpFetcher().fetch("https://www.reddit.com/r/x/comments/abc123/t/")
+
+        assert result.fetch_method == "reddit_json"
+        assert result.content_type == "application/json"
+        assert mock_get.call_args[0][0] == "https://www.reddit.com/r/x/comments/abc123/t.json"
+
+    @patch("auditframework.ingestion.fetcher.requests.get")
+    def test_reddit_json_failure_falls_back_to_html(self, mock_get):
+        mock_get.side_effect = [
+            _response(403, b"blocked", {"Content-Type": "application/json"}),
+            _response(200, b"<html>ok</html>"),
+        ]
+        result = HttpFetcher().fetch("https://www.reddit.com/r/x/comments/abc123/t/")
+
+        assert result.fetch_method == "requests"
+        assert result.content == b"<html>ok</html>"

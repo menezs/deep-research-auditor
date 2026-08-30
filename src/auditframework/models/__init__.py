@@ -1,4 +1,4 @@
-from .audit_result import AuditResult, AuditVerdict, SkippedChunk
+from .audit_result import AuditResult, AuditVerdict, SkippedChunk, VerificationStep
 from .chunk import AnswerChunk, ReferenceChunk
 from .curated import CuratedDocument, RetrievedPassage
 from .document import Document
@@ -9,6 +9,7 @@ __all__ = [
     "AuditResult",
     "AuditVerdict",
     "SkippedChunk",
+    "VerificationStep",
     "AnswerChunk",
     "ReferenceChunk",
     "CuratedDocument",
