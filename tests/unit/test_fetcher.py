@@ -4,7 +4,7 @@ import pytest
 import requests
 
 from auditframework.common.errors import DeadReferenceError, InaccessibleReferenceError
-from auditframework.ingestion.fetcher import HttpFetcher
+from auditframework.ingestion.fetcher import HttpFetcher, _retry_after_seconds
 
 
 def _response(status_code: int, content: bytes = b"<html></html>", headers: dict | None = None):
@@ -15,21 +15,26 @@ def _response(status_code: int, content: bytes = b"<html></html>", headers: dict
     return resp
 
 
-@patch("auditframework.ingestion.fetcher.requests.get")
+def _hit(status_code: int, content: bytes = b"<html></html>", headers: dict | None = None, method: str = "curl_cffi"):
+    """Retorno de `_http_get`: (response, metodo)."""
+    return _response(status_code, content, headers), method
+
+
+@patch("auditframework.ingestion.fetcher._http_get")
 def test_successful_fetch_returns_result(mock_get):
-    mock_get.return_value = _response(200, b"<html>ok</html>")
+    mock_get.return_value = _hit(200, b"<html>ok</html>")
     fetcher = HttpFetcher()
 
     result = fetcher.fetch("https://example.com")
 
-    assert result.fetch_method == "requests"
+    assert result.fetch_method == "curl_cffi"
     assert result.http_status == 200
     assert result.content == b"<html>ok</html>"
 
 
-@patch("auditframework.ingestion.fetcher.requests.get")
+@patch("auditframework.ingestion.fetcher._http_get")
 def test_404_raises_dead_reference_error(mock_get):
-    mock_get.return_value = _response(404)
+    mock_get.return_value = _hit(404)
     fetcher = HttpFetcher()
 
     with pytest.raises(DeadReferenceError):
@@ -37,7 +42,7 @@ def test_404_raises_dead_reference_error(mock_get):
 
 
 @patch("time.sleep", return_value=None)
-@patch("auditframework.ingestion.fetcher.requests.get")
+@patch("auditframework.ingestion.fetcher._http_get")
 def test_persistent_connection_error_raises_inaccessible(mock_get, _mock_sleep):
     mock_get.side_effect = requests.exceptions.ConnectionError("boom")
     fetcher = HttpFetcher(max_retries=2)
@@ -49,11 +54,11 @@ def test_persistent_connection_error_raises_inaccessible(mock_get, _mock_sleep):
 
 
 @patch("time.sleep", return_value=None)
-@patch("auditframework.ingestion.fetcher.requests.get")
+@patch("auditframework.ingestion.fetcher._http_get")
 def test_transient_error_then_success_recovers(mock_get, _mock_sleep):
     mock_get.side_effect = [
         requests.exceptions.Timeout("slow"),
-        _response(200, b"ok"),
+        _hit(200, b"ok"),
     ]
     fetcher = HttpFetcher(max_retries=2)
 
@@ -63,7 +68,21 @@ def test_transient_error_then_success_recovers(mock_get, _mock_sleep):
     assert mock_get.call_count == 2
 
 
-@patch("auditframework.ingestion.fetcher.requests.get")
+@patch("time.sleep", return_value=None)
+@patch("auditframework.ingestion.fetcher._http_get")
+def test_read_timeout_is_retried_at_most_once(mock_get, _mock_sleep):
+    """Um read timeout e assinatura de anti-bot que nao responde ao nosso
+    cliente — no maximo 1 nova tentativa, ignorando `max_retries` alto."""
+    mock_get.side_effect = requests.exceptions.ReadTimeout("tarpit")
+    fetcher = HttpFetcher(max_retries=5)
+
+    with pytest.raises(InaccessibleReferenceError, match="read timeout"):
+        fetcher.fetch("https://tarpit.example.com")
+
+    assert mock_get.call_count == 2  # inicial + 1 unica retentativa
+
+
+@patch("auditframework.ingestion.fetcher._http_get")
 def test_url_with_percent20_falls_back_to_hyphen_variant_on_404(mock_get):
     """Regressao: URLs reconstruidas pela extracao com `%20` no lugar de
     um ponto de quebra de linha ambiguo (poderia ser `-` ou nenhum
@@ -72,9 +91,9 @@ def test_url_with_percent20_falls_back_to_hyphen_variant_on_404(mock_get):
 
     def side_effect(url, **kwargs):
         if url == "https://example.com/doenca%20de-alzheimer":
-            return _response(404)
+            return _hit(404)
         if url == "https://example.com/doenca-de-alzheimer":
-            return _response(200, b"ok")
+            return _hit(200, b"ok")
         raise AssertionError(f"URL inesperada: {url}")
 
     mock_get.side_effect = side_effect
@@ -86,7 +105,7 @@ def test_url_with_percent20_falls_back_to_hyphen_variant_on_404(mock_get):
     assert mock_get.call_count == 2
 
 
-@patch("auditframework.ingestion.fetcher.requests.get")
+@patch("auditframework.ingestion.fetcher._http_get")
 def test_url_with_percent20_falls_back_to_no_separator_variant(mock_get):
     """A variante `-` tambem pode falhar (ex: a URL real nao tinha
     separador nenhum no ponto de quebra) — nesse caso tenta a variante
@@ -94,11 +113,11 @@ def test_url_with_percent20_falls_back_to_no_separator_variant(mock_get):
 
     def side_effect(url, **kwargs):
         if url == "https://example.com/do%20enca":
-            return _response(404)
+            return _hit(404)
         if url == "https://example.com/do-enca":
-            return _response(404)
+            return _hit(404)
         if url == "https://example.com/doenca":
-            return _response(200, b"ok")
+            return _hit(200, b"ok")
         raise AssertionError(f"URL inesperada: {url}")
 
     mock_get.side_effect = side_effect
@@ -110,9 +129,9 @@ def test_url_with_percent20_falls_back_to_no_separator_variant(mock_get):
     assert mock_get.call_count == 3
 
 
-@patch("auditframework.ingestion.fetcher.requests.get")
+@patch("auditframework.ingestion.fetcher._http_get")
 def test_url_with_percent20_raises_original_error_when_no_variant_works(mock_get):
-    mock_get.return_value = _response(404)
+    mock_get.return_value = _hit(404)
     fetcher = HttpFetcher()
 
     with pytest.raises(DeadReferenceError, match="doenca%20de-alzheimer"):
@@ -121,9 +140,9 @@ def test_url_with_percent20_raises_original_error_when_no_variant_works(mock_get
     assert mock_get.call_count == 3  # original + 2 variantes
 
 
-@patch("auditframework.ingestion.fetcher.requests.get")
+@patch("auditframework.ingestion.fetcher._http_get")
 def test_url_without_percent20_does_not_try_variants_on_404(mock_get):
-    mock_get.return_value = _response(404)
+    mock_get.return_value = _hit(404)
     fetcher = HttpFetcher()
 
     with pytest.raises(DeadReferenceError):
@@ -133,9 +152,9 @@ def test_url_without_percent20_does_not_try_variants_on_404(mock_get):
 
 
 @patch("auditframework.ingestion.fetcher.HttpFetcher.fetch_via_playwright")
-@patch("auditframework.ingestion.fetcher.requests.get")
+@patch("auditframework.ingestion.fetcher._http_get")
 def test_403_falls_back_to_cloudscraper_then_playwright(mock_get, mock_playwright):
-    mock_get.return_value = _response(403)
+    mock_get.return_value = _hit(403)
 
     fake_cloudscraper = MagicMock()
     fake_scraper = MagicMock()
@@ -159,9 +178,15 @@ def test_403_falls_back_to_cloudscraper_then_playwright(mock_get, mock_playwrigh
     mock_playwright.assert_called_once_with("https://protegido.example.com")
 
 
-class TestRedditJson:
-    from auditframework.ingestion.fetcher import _reddit_thread_json_url as _fn
+@pytest.mark.parametrize(
+    "header,expected",
+    [(None, 30.0), ("5", 5.0), ("120", 30.0), ("3600", 30.0), ("Mon, 01 Jan 2035 00:00:00 GMT", 30.0)],
+)
+def test_retry_after_is_capped(header, expected):
+    assert _retry_after_seconds(header) == expected
 
+
+class TestRedditJson:
     def test_thread_url_maps_to_json_endpoint(self):
         from auditframework.ingestion.fetcher import _reddit_thread_json_url
 
@@ -188,13 +213,13 @@ class TestRedditJson:
         assert result.content_type == "application/json"
         assert mock_get.call_args[0][0] == "https://www.reddit.com/r/x/comments/abc123/t.json"
 
+    @patch("auditframework.ingestion.fetcher._http_get")
     @patch("auditframework.ingestion.fetcher.requests.get")
-    def test_reddit_json_failure_falls_back_to_html(self, mock_get):
-        mock_get.side_effect = [
-            _response(403, b"blocked", {"Content-Type": "application/json"}),
-            _response(200, b"<html>ok</html>"),
-        ]
+    def test_reddit_json_failure_falls_back_to_html(self, mock_get, mock_http_get):
+        mock_get.return_value = _response(403, b"blocked", {"Content-Type": "application/json"})
+        mock_http_get.return_value = _hit(200, b"<html>ok</html>")
+
         result = HttpFetcher().fetch("https://www.reddit.com/r/x/comments/abc123/t/")
 
-        assert result.fetch_method == "requests"
+        assert result.fetch_method == "curl_cffi"
         assert result.content == b"<html>ok</html>"

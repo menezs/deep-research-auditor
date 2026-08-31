@@ -22,7 +22,7 @@ flowchart TD
     end
 
     subgraph ING["ingestion/"]
-        REF -->|"Fetcher (Reddit→API .json; senão requests→cloudscraper→playwright)<br/>+ Converter → Markdown"| DOC["Document<br/>+ Reference.status"]
+        REF -->|"Fetcher (Reddit→API .json; senão curl_cffi→cloudscraper→playwright)<br/>+ Converter → Markdown"| DOC["Document<br/>+ Reference.status"]
     end
 
     subgraph IDX["indexing/"]
@@ -214,7 +214,9 @@ aplicam:
    de suporte), e distribuição de veredito. Sinaliza referências citadas mas
    nunca creditadas como fonte de suporte.
 6. **Referências Mortas e Inacessíveis** — HTTP 404 e 403/timeout/SSL após
-   esgotar as estratégias de fetch (com retry serial de timeout no fim do run).
+   esgotar as estratégias de fetch (`curl_cffi` com fingerprint de navegador →
+   cloudscraper → playwright), com teto de tempo por referência e uma 2ª
+   tentativa só para falhas possivelmente transitórias.
 7. **Exemplos por Veredito** — até 3 por veredito, com trecho, justificativa,
    evidência literal, quais referências sustentaram, aspectos não cobertos e — se
    reclassificado — o que o baseline dizia + trilha da cascata.

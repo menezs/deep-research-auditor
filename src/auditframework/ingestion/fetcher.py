@@ -12,6 +12,64 @@ from ..logging_config import get_logger
 
 logger = get_logger(__name__)
 
+try:
+    # Cliente HTTP com fingerprint TLS de um navegador real. Muitos WAFs
+    # (Cloudflare, Akamai, Imperva — ex: edn.com) detectam o fingerprint
+    # do `requests` puro e "tarpitam" a conexao: aceitam o socket e nunca
+    # respondem, ate o timeout estourar. Com o fingerprint de Chrome a
+    # mesma pagina volta em ~0.5s. Vem no extra [ingestion].
+    from curl_cffi import requests as _curl_requests
+    from curl_cffi.requests import exceptions as _curl_exceptions
+except ImportError:  # pragma: no cover - fallback quando o extra nao esta instalado
+    _curl_requests = None
+    _curl_exceptions = None
+
+_IMPERSONATE = "chrome"
+
+# Um "read timeout" (servidor aceitou a conexao e nao respondeu no tempo)
+# e, na pratica, anti-bot nos segurando — insistir com o mesmo cliente
+# quase nunca ajuda. Limitamos a 1 nova tentativa, independente de
+# `max_retries` (que vale para falhas de conexao, essas sim transitorias).
+_MAX_READ_TIMEOUT_RETRIES = 1
+_MAX_RETRY_AFTER_SECONDS = 30.0
+
+_READ_TIMEOUT_ERRORS: tuple[type[BaseException], ...] = (requests.exceptions.ReadTimeout,)
+_TRANSIENT_ERRORS: tuple[type[BaseException], ...] = (
+    requests.exceptions.ConnectionError,
+    requests.exceptions.Timeout,
+)
+if _curl_exceptions is not None:
+    _READ_TIMEOUT_ERRORS += (_curl_exceptions.ReadTimeout,)
+    _TRANSIENT_ERRORS += (_curl_exceptions.ConnectionError, _curl_exceptions.Timeout)
+
+
+def _http_get(
+    url: str,
+    *,
+    headers: dict[str, str],
+    timeout: tuple[float, float],
+    verify: bool,
+    allow_redirects: bool = True,
+) -> tuple[object, str]:
+    """GET via curl_cffi (fingerprint TLS de Chrome) quando disponivel,
+    caindo para `requests` puro se o extra [ingestion] nao estiver
+    instalado. Devolve `(response, metodo)` — os dois backends expoem
+    `status_code` / `content` / `headers` da mesma forma."""
+    if _curl_requests is not None:
+        response = _curl_requests.get(
+            url,
+            headers=headers,
+            timeout=timeout,
+            verify=verify,
+            allow_redirects=allow_redirects,
+            impersonate=_IMPERSONATE,
+        )
+        return response, "curl_cffi"
+    response = requests.get(
+        url, headers=headers, timeout=timeout, verify=verify, allow_redirects=allow_redirects
+    )
+    return response, "requests"
+
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
@@ -54,6 +112,15 @@ def _is_pdf_url(url: str) -> bool:
     return urlsplit(url).path.lower().endswith(".pdf")
 
 
+def _retry_after_seconds(header_value: str | None) -> float:
+    """Segundos a esperar apos um 429, com teto — um servidor pode mandar
+    `Retry-After: 3600` (ou uma data HTTP), e nao vamos dormir uma hora."""
+    try:
+        return min(float(header_value), _MAX_RETRY_AFTER_SECONDS) if header_value else _MAX_RETRY_AFTER_SECONDS
+    except (TypeError, ValueError):
+        return _MAX_RETRY_AFTER_SECONDS
+
+
 class _Http403Error(Exception):
     """Sinal de controle interno: 403 recebido, tentar proximo fallback."""
 
@@ -67,9 +134,11 @@ class FetchResult:
 
 
 class HttpFetcher:
-    """Baixa o conteudo de uma URL com fallback em cascata: requests ->
-    cloudscraper (anti-bot) -> playwright (paginas JS-renderizadas ou
-    protegidas por JS-challenge que o cloudscraper nao resolve).
+    """Baixa o conteudo de uma URL com fallback em cascata: curl_cffi
+    (fingerprint TLS de Chrome; `requests` puro quando o extra nao esta
+    instalado) -> cloudscraper (JS-challenge antigo do Cloudflare) ->
+    playwright (paginas JS-renderizadas ou protegidas por challenge que o
+    cloudscraper nao resolve).
 
     Porta a logica de fallback do CorpusForge (`FileConverter._fetch_html`),
     mas substitui os dicts de erro livre por excecoes tipadas
@@ -77,7 +146,7 @@ class HttpFetcher:
 
     def __init__(
         self,
-        timeout: tuple[float, float] = (10, 60),
+        timeout: tuple[float, float] = (10, 15),
         max_retries: int = 2,
         backoff: float = 2.0,
     ) -> None:
@@ -191,10 +260,13 @@ class HttpFetcher:
 
     def _get(self, url: str, *, verify: bool, attempt: int = 0) -> FetchResult:
         try:
-            response = requests.get(
-                url, headers=_HEADERS, timeout=self.timeout, verify=verify, allow_redirects=True
-            )
-        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+            response, method = _http_get(url, headers=_HEADERS, timeout=self.timeout, verify=verify)
+        except _READ_TIMEOUT_ERRORS as exc:
+            if attempt >= min(self.max_retries, _MAX_READ_TIMEOUT_RETRIES):
+                raise InaccessibleReferenceError(f"Sem resposta (read timeout) de {url}: {exc}") from exc
+            time.sleep(self.backoff * (2**attempt))
+            return self._get(url, verify=verify, attempt=attempt + 1)
+        except _TRANSIENT_ERRORS as exc:
             if attempt >= self.max_retries:
                 raise InaccessibleReferenceError(f"Falha ao conectar em {url}: {exc}") from exc
             time.sleep(self.backoff * (2**attempt))
@@ -209,8 +281,7 @@ class HttpFetcher:
         if response.status_code == 429:
             if attempt >= self.max_retries:
                 raise InaccessibleReferenceError(f"Rate limit persistente em {url}")
-            retry_after = float(response.headers.get("Retry-After", 60))
-            time.sleep(retry_after)
+            time.sleep(_retry_after_seconds(response.headers.get("Retry-After")))
             return self._get(url, verify=verify, attempt=attempt + 1)
 
         if response.status_code >= 400:
@@ -222,7 +293,7 @@ class HttpFetcher:
         return FetchResult(
             content=response.content,
             content_type=response.headers.get("Content-Type", ""),
-            fetch_method="requests",
+            fetch_method=method,
             http_status=response.status_code,
         )
 

@@ -23,6 +23,7 @@ dependencies = [
 # sentence-transformers, langchain, etc.) antes de a fase existir.
 ingestion = [
     "requests>=2.31",
+    "curl_cffi>=0.7",
     "cloudscraper>=1.2.71",
     "playwright>=1.61",
     "trafilatura>=2.1",

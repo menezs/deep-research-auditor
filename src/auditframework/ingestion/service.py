@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
@@ -16,6 +16,11 @@ from .fetcher import FetchResult, HttpFetcher
 from .registry import ReferenceRegistry
 
 logger = get_logger(__name__)
+
+# Teto de tempo por referencia — rede de seguranca contra qualquer hang
+# (DNS travado, playwright preso, host inesperado). O caso comum ja e
+# resolvido pelos timeouts curtos do HttpFetcher; isto e o backstop.
+_REF_BUDGET_SECONDS = 90.0
 
 
 class Fetcher(Protocol):
@@ -68,32 +73,56 @@ def ingest_references(
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_ref = {executor.submit(_ingest_one, ref, fetcher): ref for ref in pending}
         for future in tqdm(
-            as_completed(future_to_ref),
+            list(future_to_ref),
             total=len(future_to_ref),
             desc="Baixando referências",
             unit="ref",
             colour=STAGE_COLORS["ingestion"],
         ):
-            new_ref, document, markdown = future.result()
+            ref = future_to_ref[future]
+            try:
+                new_ref, document, markdown = future.result(timeout=_REF_BUDGET_SECONDS)
+            except FuturesTimeoutError:
+                future.cancel()
+                logger.warning(
+                    "Referencia %s nao concluiu o download em %.0fs — marcada inacessivel",
+                    ref.raw_url,
+                    _REF_BUDGET_SECONDS,
+                )
+                new_ref, document, markdown = (
+                    _with_status(
+                        ref, ReferenceStatus.INACCESSIBLE, f"download excedeu {_REF_BUDGET_SECONDS:.0f}s"
+                    ),
+                    None,
+                    None,
+                )
             updated[new_ref.id] = new_ref
             if document is not None and markdown is not None:
                 registry.save_document(document, markdown)
                 documents.append(document)
 
-    # Segunda passada, serial e com timeout generoso, so para as
-    # referencias que ficaram INACCESSIBLE (tipicamente timeout/rate-limit
-    # transitorio). DEAD (404) e ERROR nao sao retentados aqui.
-    inaccessible = [r for r in updated.values() if r.status == ReferenceStatus.INACCESSIBLE]
-    if inaccessible:
-        retry_fetcher = fetcher if fetcher_was_provided else HttpFetcher(timeout=(15, 180), max_retries=3, backoff=3.0)
-        logger.info("Retentando %d referencia(s) inacessivel(is) com timeout maior", len(inaccessible))
+    # Segunda passada, serial, so para as referencias que ficaram
+    # INACCESSIBLE por um motivo possivelmente transitorio (rate-limit,
+    # 5xx, reset de conexao). Um "read timeout" e assinatura de anti-bot
+    # que nao responde ao nosso cliente — insistir e desperdicio. DEAD
+    # (404) e ERROR tambem nao sao retentados.
+    retriable = [
+        r for r in updated.values() if r.status == ReferenceStatus.INACCESSIBLE and _worth_retrying(r)
+    ]
+    if retriable:
+        retry_fetcher = (
+            fetcher if fetcher_was_provided else HttpFetcher(timeout=(10, 40), max_retries=1, backoff=2.0)
+        )
+        logger.info(
+            "Retentando %d referencia(s) inacessivel(is) (falha possivelmente transitoria)", len(retriable)
+        )
         for ref in tqdm(
-            inaccessible,
+            retriable,
             desc="Retentando inacessíveis",
             unit="ref",
             colour=STAGE_COLORS["ingestion"],
         ):
-            new_ref, document, markdown = _ingest_one(ref, retry_fetcher)
+            new_ref, document, markdown = _ingest_one_bounded(ref, retry_fetcher, _REF_BUDGET_SECONDS)
             updated[new_ref.id] = new_ref
             if document is not None and markdown is not None:
                 registry.save_document(document, markdown)
@@ -104,6 +133,42 @@ def ingest_references(
     final_references = list(updated.values())
     registry.save_references(final_references)
     return final_references, documents
+
+
+def _worth_retrying(reference: Reference) -> bool:
+    """A 2a passada so faz sentido para falhas potencialmente
+    transitorias. Um `read timeout` (o servidor aceita a conexao e nunca
+    responde) e assinatura de anti-bot por fingerprint — nao adianta
+    insistir com o mesmo cliente."""
+    msg = (reference.error_message or "").lower()
+    return "read timeout" not in msg and "excedeu" not in msg
+
+
+def _ingest_one_bounded(
+    reference: Reference, fetcher: Fetcher, budget_seconds: float
+) -> tuple[Reference, Document | None, str | None]:
+    """`_ingest_one` com teto de tempo (a 2a passada e serial e um host
+    problematico ainda poderia travar todo o lote)."""
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(_ingest_one, reference, fetcher)
+    try:
+        return future.result(timeout=budget_seconds)
+    except FuturesTimeoutError:
+        future.cancel()
+        logger.warning(
+            "Referencia %s excedeu %.0fs na segunda tentativa — mantida inacessivel",
+            reference.raw_url,
+            budget_seconds,
+        )
+        return (
+            _with_status(
+                reference, ReferenceStatus.INACCESSIBLE, f"2a tentativa excedeu {budget_seconds:.0f}s"
+            ),
+            None,
+            None,
+        )
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def _ingest_one(
