@@ -4,7 +4,7 @@ from ...common.errors import LLMParseError
 from ...common.llm_client import LLMClient, LLMUsage
 from ...ingestion.registry import ReferenceRegistry
 from ...logging_config import get_logger
-from ...models import AnswerChunk, AuditResult, AuditVerdict
+from ...models import AnswerChunk, AuditResult, AuditVerdict, ReferenceVerdict
 from .cascade import StageOutcome
 from .prompts import WINDOW_SCAN_SYSTEM_MESSAGE, WindowAssessment, build_window_scan_prompt
 
@@ -48,6 +48,7 @@ class FullDocumentScanStage:
         pt = ct = lat = 0
         cost = 0.0
         contradiction: tuple[str, WindowAssessment] | None = None
+        partial_by_rid: dict[str, str] = {}  # rid -> primeiro excerto parcial encontrado
 
         for rid, window in windows:
             try:
@@ -59,12 +60,16 @@ class FullDocumentScanStage:
             ct += usage.completion_tokens
             cost += usage.cost_usd
             lat += usage.latency_ms
+            if assessment.relation == "partial" and rid not in partial_by_rid:
+                partial_by_rid[rid] = assessment.cited_excerpts[0] if assessment.cited_excerpts else ""
             if assessment.relation == "supports":
+                excerpt = assessment.cited_excerpts[0] if assessment.cited_excerpts else ""
                 return StageOutcome(
                     verdict=AuditVerdict.SUPPORTED,
                     justification=assessment.justification,
                     cited_excerpts=assessment.cited_excerpts,
                     supporting_reference_ids=[rid],
+                    per_reference=[ReferenceVerdict(reference_id=rid, relation="supports", excerpt=excerpt)],
                     note=f"suporte encontrado na varredura completa de {rid}",
                     prompt_tokens=pt,
                     completion_tokens=ct,
@@ -76,10 +81,12 @@ class FullDocumentScanStage:
 
         if contradiction is not None:
             rid, assessment = contradiction
+            excerpt = assessment.cited_excerpts[0] if assessment.cited_excerpts else ""
             return StageOutcome(
                 verdict=AuditVerdict.CONTRADICTED,
                 justification=assessment.justification,
                 cited_excerpts=assessment.cited_excerpts,
+                per_reference=[ReferenceVerdict(reference_id=rid, relation="contradicts", excerpt=excerpt)],
                 note=f"contradicao encontrada na varredura completa de {rid}",
                 prompt_tokens=pt,
                 completion_tokens=ct,
@@ -87,9 +94,40 @@ class FullDocumentScanStage:
                 latency_ms=lat,
             )
 
+        # nenhuma janela sustentou a afirmacao INTEIRA. Se alguma fonte citada
+        # cobre parte dela, o veredito continua UNSUPPORTED (a afirmacao como
+        # enunciada nao se sustenta), mas anotamos `partial` em vez de `absent`
+        # e NAO marcamos `unsupported_confirmed` (`inconclusive=True`) — parte
+        # do fato esta, comprovadamente, na fonte citada.
+        if partial_by_rid:
+            cobre = ", ".join(partial_by_rid)
+            return StageOutcome(
+                verdict=AuditVerdict.UNSUPPORTED,
+                justification=current.justification,
+                cited_excerpts=[e for e in partial_by_rid.values() if e],
+                per_reference=[
+                    ReferenceVerdict(
+                        reference_id=rid,
+                        relation="partial" if rid in partial_by_rid else "absent",
+                        excerpt=partial_by_rid.get(rid, ""),
+                    )
+                    for rid in available
+                ],
+                note=f"afirmacao apenas parcialmente presente em {cobre}; nao sustentada como enunciada",
+                inconclusive=True,
+                prompt_tokens=pt,
+                completion_tokens=ct,
+                cost_usd=cost,
+                latency_ms=lat,
+            )
+
+        # o claim nao apareceu em NENHUMA janela de NENHUM documento citado —
+        # afirmacao comprovadamente ausente de cada fonte varrida (nao "nao
+        # estava no trecho recuperado", mas "nao esta no documento")
         return StageOutcome(
             verdict=AuditVerdict.UNSUPPORTED,
             justification=current.justification,
+            per_reference=[ReferenceVerdict(reference_id=rid, relation="absent") for rid in available],
             note=f"claim ausente das {len(windows)} janela(s) do(s) documento(s) citado(s)",
             prompt_tokens=pt,
             completion_tokens=ct,

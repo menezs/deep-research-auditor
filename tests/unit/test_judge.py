@@ -116,3 +116,21 @@ def test_supporting_reference_ids_are_filtered_to_the_retrieved_passages():
 
     assert result.supporting_reference_ids == ["refA"]
     assert result.unsupported_aspects == ["a data exata não aparece"]
+
+
+def test_per_reference_is_filtered_and_derives_supporting_ids():
+    from auditframework.models import ReferenceVerdict
+
+    output = JudgeOutput(
+        verdict="supported",
+        justification="ok",
+        per_reference=[
+            ReferenceVerdict(reference_id="refA", relation="partial", excerpt="parte"),
+            ReferenceVerdict(reference_id="ref-inventada", relation="supports", excerpt="x"),
+        ],
+    )
+    result = Verifier(FakeLLMClient(response=output)).verify(_chunk(), _curated())
+
+    assert [pr.reference_id for pr in result.per_reference] == ["refA"]  # inventada removida
+    assert result.per_reference[0].relation == "partial"
+    assert result.supporting_reference_ids == ["refA"]  # derivado (partial conta)

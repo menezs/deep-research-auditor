@@ -1,15 +1,30 @@
-from .audit_result import AuditResult, AuditVerdict, SkippedChunk, VerificationStep
+from .audit_result import (
+    AuditResult,
+    AuditVerdict,
+    ReferenceVerdict,
+    SkippedChunk,
+    VerificationStep,
+)
 from .chunk import AnswerChunk, ReferenceChunk
 from .curated import CuratedDocument, RetrievedPassage
 from .document import Document
 from .reference import Reference, ReferenceStatus
-from .report import JudgeConfig, PotentiallyUnsourcedChunk, Report, ReferenceStats, ToolStats
+from .report import (
+    JudgeConfig,
+    PotentiallyUnsourcedChunk,
+    Report,
+    ReferenceStats,
+    SourceInfo,
+    ToolStats,
+    UncitedClaimChunk,
+)
 
 __all__ = [
     "AuditResult",
     "AuditVerdict",
     "SkippedChunk",
     "VerificationStep",
+    "ReferenceVerdict",
     "AnswerChunk",
     "ReferenceChunk",
     "CuratedDocument",
@@ -20,6 +35,8 @@ __all__ = [
     "Report",
     "JudgeConfig",
     "PotentiallyUnsourcedChunk",
+    "UncitedClaimChunk",
     "ReferenceStats",
+    "SourceInfo",
     "ToolStats",
 ]

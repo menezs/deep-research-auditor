@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from ..common.llm_client import LLMClient
 from ..logging_config import get_logger
-from ..models import AnswerChunk, AuditResult, AuditVerdict, CuratedDocument
+from ..models import AnswerChunk, AuditResult, AuditVerdict, CuratedDocument, ReferenceVerdict
 from .prompts import JUDGE_SYSTEM_MESSAGE, JudgeOutput, build_judge_prompt
 
 logger = get_logger(__name__)
@@ -44,7 +44,17 @@ class Verifier:
 
         # o juiz pode devolver ids fora do contexto — mantem so os reais
         available_ref_ids = {p.reference_id for p in curated.passages}
+        per_reference: list[ReferenceVerdict] = []
+        seen: set[str] = set()
+        for pr in output.per_reference:
+            if pr.reference_id in available_ref_ids and pr.reference_id not in seen:
+                per_reference.append(pr)
+                seen.add(pr.reference_id)
+
         supporting = [r for r in output.supporting_reference_ids if r in available_ref_ids]
+        if not supporting and per_reference:
+            # o juiz preencheu so per_reference — deriva os que contribuem
+            supporting = [pr.reference_id for pr in per_reference if pr.relation in ("supports", "partial")]
 
         return AuditResult(
             answer_chunk_id=chunk.id,
@@ -53,6 +63,7 @@ class Verifier:
             cited_excerpts=output.cited_excerpts,
             supporting_reference_ids=supporting,
             unsupported_aspects=output.unsupported_aspects,
+            per_reference=per_reference,
             prompt_tokens=usage.prompt_tokens,
             completion_tokens=usage.completion_tokens,
             cost_usd=usage.cost_usd,

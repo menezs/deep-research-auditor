@@ -185,7 +185,10 @@ class TestSmallModelHeuristic:
     def test_flags_small_models(self):
         from auditframework.pipeline import _looks_like_small_model
 
-        for m in ("google/gemma-4-e4b", "qwen2.5-3b", "phi-3-mini", "llama-3.2-1b", "mistral-7b"):
+        for m in (
+            "google/gemma-4-e4b", "qwen2.5-3b", "phi-3-mini", "llama-3.2-1b", "mistral-7b",
+            "deepseek-v4-flash", "gemini-2.5-flash-lite", "qwen3-4b-fast", "deepseek-r1-distill-llama-8b",
+        ):
             assert _looks_like_small_model(m) is True, m
 
     def test_does_not_flag_large_models(self):

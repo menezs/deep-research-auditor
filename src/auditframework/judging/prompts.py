@@ -4,6 +4,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from ..models import ReferenceVerdict
+
 
 class JudgeOutput(BaseModel):
     """Schema da saida estruturada exigida do LLM juiz."""
@@ -19,6 +21,9 @@ class JudgeOutput(BaseModel):
     """Partes especificas da afirmacao que a EVIDENCE NAO cobre — mesmo
     quando o veredito geral e `supported`. Vazio se a evidencia cobre a
     afirmacao inteira."""
+    per_reference: list[ReferenceVerdict] = Field(default_factory=list)
+    """Uma entrada por id que aparece nos cabecalhos `[referencia=<id> ...]`
+    da EVIDENCE, dizendo como aquela fonte se relaciona com a afirmacao."""
 
 
 JUDGE_SYSTEM_MESSAGE = (
@@ -67,5 +72,12 @@ def build_judge_prompt(chunk_text: str, curated_context: str) -> str:
         "EVIDENCE nao cobre — datas exatas, itens de listas, entidades, numeros — "
         "MESMO quando o veredito for supported. Vazio so se a evidencia cobrir a "
         "afirmacao inteira.\n"
+        "Em per_reference, inclua UMA entrada para CADA id distinto que aparece "
+        "nos cabecalhos `[referencia=<id> ...]` da EVIDENCE, com:\n"
+        "  - relation: `supports` (aquela fonte sozinha sustenta a afirmacao "
+        "inteira), `partial` (sustenta parte), `absent` (nao trata a afirmacao) "
+        "ou `contradicts` (conflita com a afirmacao);\n"
+        "  - excerpt: trecho LITERAL daquela fonte que justifica a relacao "
+        "(vazio se `absent`).\n"
         "Escreva a justificativa em portugues, de forma objetiva e curta."
     )

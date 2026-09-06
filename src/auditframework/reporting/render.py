@@ -24,6 +24,13 @@ _VERDICT_LABELS: dict[AuditVerdict, str] = {
     AuditVerdict.CONTRADICTED: "CONTRADICTED",
 }
 
+_RELATION_LABELS: dict[str, str] = {
+    "supports": "sustenta",
+    "partial": "parcial",
+    "absent": "ausente",
+    "contradicts": "contradiz",
+}
+
 _MAX_EXAMPLES_PER_VERDICT = 3
 _EXCERPT_LEN = 220
 
@@ -31,6 +38,23 @@ _EXCERPT_LEN = 220
 def _excerpt(text: str, length: int = _EXCERPT_LEN) -> str:
     text = " ".join(text.split())
     return text if len(text) <= length else text[: length - 1].rstrip() + "…"
+
+
+def _compress_positions(positions: list[int]) -> str:
+    """`[1, 2, 3, 5, 8, 9]` -> `#1–3, #5, #8–9`."""
+    nums = sorted(set(positions))
+    if not nums:
+        return ""
+    ranges: list[str] = []
+    start = prev = nums[0]
+    for n in nums[1:]:
+        if n == prev + 1:
+            prev = n
+            continue
+        ranges.append(f"#{start}" if start == prev else f"#{start}–{prev}")
+        start = prev = n
+    ranges.append(f"#{start}" if start == prev else f"#{start}–{prev}")
+    return ", ".join(ranges)
 
 
 def _format_duration(seconds: float) -> str:
@@ -78,8 +102,10 @@ class ReportRenderer:
             self._render_verification(),
             self._render_cost(),
             self._render_reference_ranking(),
+            self._render_content_verification(),
             self._render_dead_and_inaccessible(),
             self._render_examples() if self._results else None,
+            self._render_uncited_claims(),
             self._render_potentially_unsourced(),
             self._render_skipped_chunks(),
         ]
@@ -121,7 +147,51 @@ class ReportRenderer:
             if judge.base_url:
                 rows.append(("Base URL", judge.base_url))
         table = "\n".join(f"| **{label}** | {value} |" for label, value in rows)
-        return ReportSection("Metadados da Execução", "| Campo | Valor |\n|---|---|\n" + table)
+        body = "| Campo | Valor |\n|---|---|\n" + table
+        source_block = self._render_source_info()
+        if source_block:
+            body += "\n\n" + source_block
+        return ReportSection("Metadados da Execução", body)
+
+    def _render_source_info(self) -> str:
+        si = self.report.source_info
+        if si is None:
+            return ""
+        na = "— (ausente)"
+        kb = f"{si.size_bytes / 1024:.1f} KB"
+        rows = [("Formato / tamanho", f"{si.format} · {kb}")]
+        if si.page_count is not None:
+            rows.append(("Páginas", str(si.page_count)))
+        if si.pdf_creator or si.pdf_producer:
+            rows.append(("Criador / Produtor", f"{si.pdf_creator or '—'} / {si.pdf_producer or '—'}"))
+        rows.append(("Título / Autor", f"{si.pdf_title or na} / {si.pdf_author or na}"))
+        if si.created or si.modified:
+            rows.append(("Criação / Modificação", f"{si.created or '—'} / {si.modified or '—'}"))
+        if si.encrypted:
+            rows.append(("Criptografia", "sim"))
+        rows.append(
+            ("Citações no corpo", f"{si.citation_markers_total} marcadores, {si.citation_markers_distinct} distintos")
+        )
+        rows.append(
+            ("Referências listadas", f"{si.references_listed} ({si.references_never_cited} nunca citadas)")
+        )
+        table = "**Arquivo de origem**\n\n| Campo | Valor |\n|---|---|\n" + "\n".join(
+            f"| {label} | {value} |" for label, value in rows
+        )
+        notes = []
+        if si.browser_print:
+            notes.append(
+                "PDF gerado por impressão de navegador (Skia/PDF + Chromium) — típico de captura de "
+                "resposta de Deep Research; sem metadados de autoria confiáveis."
+            )
+        if si.citation_markers_distinct > si.references_listed:
+            notes.append(
+                f"{si.citation_markers_distinct} números de citação distintos no corpo para apenas "
+                f"{si.references_listed} referências listadas — há marcadores `[N]` sem entrada correspondente."
+            )
+        for note in notes:
+            table += f"\n\n> {note}"
+        return table
 
     def _render_distribution(self) -> ReportSection:
         report = self.report
@@ -144,6 +214,11 @@ class ReportRenderer:
             body += (
                 f"\n\n> {report.count_partially_supported} de {report.count_supported} SUPPORTED têm "
                 "aspectos da afirmação não cobertos pela evidência (\"parcialmente suportada\") — ver Exemplos."
+            )
+        if report.count_uncited_claims:
+            body += (
+                f"\n\n> {report.count_uncited_claims} de {report.count_claim_chunks} trechos com afirmação "
+                "factual não têm nenhuma citação no documento — ver *Afirmações sem Citação*."
             )
         return ReportSection("Distribuição de Vereditos", body)
 
@@ -210,21 +285,74 @@ class ReportRenderer:
         summary = f"Referências sem nenhuma citação: {uncited}/{total} ({pct_uncited:.1f}%)\n"
         if report.uncredited_reference_count:
             summary += (
-                f"Referências citadas mas nunca creditadas como fonte de suporte por nenhum veredito: "
-                f"{report.uncredited_reference_count} (coluna **Suporte** = 0/N).\n"
+                f"Referências citadas mas que nunca sustentaram (nem parcialmente) nenhuma afirmação: "
+                f"{report.uncredited_reference_count}.\n"
             )
         summary += "\n"
+        summary += (
+            "> **Citada** = quantos trechos citam a fonte. **Sustenta / Parcial / Não sustenta** "
+            "abrem esse total pela relação da própria fonte com a afirmação (somam **Citada**). "
+            "*Não sustenta †* = a fonte não trata a afirmação, a contradiz, ou o juiz não "
+            "detalhou aquela fonte.\n\n"
+        )
         header = (
-            "| Referência | Status | Citações | Suporte | SUPPORTED | UNSUPPORTED | CONTRADICTED |\n"
-            "|---|---|---|---|---|---|---|\n"
+            "| Referência | Status | Citada | Sustenta | Parcial | Não sustenta † |\n"
+            "|---|---|---|---|---|---|\n"
         )
-        rows = "\n".join(
-            f"| [{self._reference_label(s.reference_id, s.url)}]({s.url}) | {s.status.value} | {s.times_cited} | "
-            f"{s.supporting_citations}/{s.times_cited} | "
-            f"{s.supported_count} | {s.unsupported_count} | {s.contradicted_count} |"
-            for s in stats
-        )
-        return ReportSection("Análise por Referência", summary + header + rows)
+        rows_out: list[str] = []
+        for s in stats:
+            label = f"[{self._reference_label(s.reference_id, s.url)}]({s.url})"
+            if s.times_cited == 0:
+                rows_out.append(f"| {label} | {s.status.value} | 0 · nunca citada | — | — | — |")
+                continue
+            unsupportive = (
+                len(s.absent_positions) + len(s.contradicts_positions) + len(s.unrated_positions)
+            )
+            rows_out.append(
+                f"| {label} | {s.status.value} | {s.times_cited} | "
+                f"{len(s.supports_positions)} | {len(s.partial_positions)} | {unsupportive} |"
+            )
+        return ReportSection("Análise por Referência", summary + header + "\n".join(rows_out))
+
+    def _render_content_verification(self) -> ReportSection | None:
+        cited = [s for s in self.report.reference_stats if s.times_cited > 0]
+        rated = [
+            s for s in cited
+            if s.supports_positions or s.partial_positions or s.absent_positions or s.contradicts_positions
+        ]
+        if not rated:
+            return None
+        lines = [
+            "Uma linha por **referência citada**: quais trechos do documento (`#N` = posição "
+            "no texto) ela sustenta, sustenta só em parte, ou não sustenta. `⚡` = a fonte "
+            "**contradiz** o trecho; `s/ aval.` = o juiz não avaliou aquela fonte no trecho. "
+            "O `#N` antes do trecho da fonte indica de qual trecho da resposta ele é evidência.",
+            "",
+            "| Referência | Sustenta | Parcial | Não sustenta | Trecho representativo da fonte |",
+            "|---|---|---|---|---|",
+        ]
+        for s in cited:
+            label = f"[{self._reference_label(s.reference_id, s.url)}]({s.url})"
+            sustenta = _compress_positions(s.supports_positions) or "—"
+            parcial = _compress_positions(s.partial_positions) or "—"
+            nao_parts: list[str] = []
+            if s.absent_positions:
+                nao_parts.append(_compress_positions(s.absent_positions))
+            if s.contradicts_positions:
+                nao_parts.append(_compress_positions(s.contradicts_positions) + " ⚡")
+            if s.unrated_positions:
+                nao_parts.append(_compress_positions(s.unrated_positions) + " (s/ aval.)")
+            nao = ", ".join(nao_parts) or "—"
+            if s.key_excerpt:
+                excerpt = _excerpt(s.key_excerpt, 160).replace("|", "\\|")
+                if s.key_excerpt_position is not None:
+                    excerpt = f"`#{s.key_excerpt_position}` {excerpt}"
+            else:
+                excerpt = "—"
+            lines.append(f"| {label} | {sustenta} | {parcial} | {nao} | {excerpt} |")
+        lines.append("")
+        lines.append("> Detalhe de cada trecho (justificativa, aspectos não cobertos): ver *Exemplos*.")
+        return ReportSection("Tabela de Verificação por Fonte", "\n".join(lines))
 
     def _reference_label(self, reference_id: str, fallback_url: str) -> str:
         reference = self._reference_by_id.get(reference_id)
@@ -273,13 +401,31 @@ class ReportRenderer:
         lines.append("\n".join(f"- `{s.answer_chunk_id}` — {s.reason}" for s in skipped))
         return ReportSection("Chunks Não Auditados", "\n".join(lines))
 
+    def _render_uncited_claims(self) -> ReportSection | None:
+        items = self.report.uncited_claims
+        if not items:
+            return None
+        lines = [
+            f"**{self.report.count_uncited_claims} de {self.report.count_claim_chunks}** trechos com "
+            "afirmação factual não têm nenhuma citação no documento. O marcador `[N]` no fim de um "
+            "parágrafo sustenta aquele parágrafo; parágrafos anteriores sem marcador próprio entram aqui "
+            "— as afirmações abaixo não têm fonte associada:",
+            "",
+        ]
+        shown = items[:12]
+        for c in shown:
+            lines.append(f"- `{c.answer_chunk_id}` — {c.excerpt}")
+        if len(items) > len(shown):
+            lines.append(f"- … e mais {len(items) - len(shown)} trecho(s) — ver `report.json`.")
+        return ReportSection("Afirmações sem Citação", "\n".join(lines))
+
     def _render_potentially_unsourced(self) -> ReportSection | None:
         chunks = self.report.potentially_unsourced_chunks
         if not chunks:
             return None
         lines = [
-            "Chunks com várias frases em que só a última está ancorada por uma citação — "
-            "as frases anteriores podem carregar afirmações sem fonte associada:",
+            "Chunks **citados** com várias frases em que só a última está diretamente ancorada pela "
+            "citação — as frases anteriores do mesmo parágrafo podem não estar cobertas pela fonte:",
             "",
         ]
         for c in chunks:
@@ -287,7 +433,7 @@ class ReportRenderer:
                 f"- `{c.answer_chunk_id}` — {c.sentence_count} frases, cita {self._markers_for(c.cited_reference_ids)}"
             )
             lines.append(f"  - {c.excerpt}")
-        return ReportSection("Afirmações Possivelmente sem Fonte", "\n".join(lines))
+        return ReportSection("Chunks Citados com Várias Afirmações", "\n".join(lines))
 
     def _render_examples(self) -> ReportSection:
         by_verdict: dict[AuditVerdict, list[AuditResult]] = {v: [] for v in AuditVerdict}
@@ -325,6 +471,16 @@ class ReportRenderer:
             lines.append(f"  - Evidência: “{_excerpt(result.cited_excerpts[0])}”")
         if result.unsupported_aspects:
             lines.append(f"  - Não coberto pela evidência: {'; '.join(a for a in result.unsupported_aspects[:3])}")
+        if len(result.per_reference) > 1 or (result.per_reference and chunk and len(chunk.cited_reference_ids) > 1):
+            lines.append("  - Verificação por fonte:")
+            lines.append("")
+            lines.append("    | Fonte | Relação | Trecho |")
+            lines.append("    |---|---|---|")
+            for pr in result.per_reference:
+                marker = self._reference_label(pr.reference_id, pr.reference_id)
+                excerpt = _excerpt(pr.excerpt, 120).replace("|", "\\|") if pr.excerpt else "—"
+                lines.append(f"    | {marker} | {_RELATION_LABELS.get(pr.relation, pr.relation)} | {excerpt} |")
+            lines.append("")
         verification = self._verification_note(result)
         if verification:
             lines.append(f"  - Verificação: {verification}")

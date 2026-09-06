@@ -10,6 +10,8 @@ from ..models import (
     JudgeConfig,
     PotentiallyUnsourcedChunk,
     Reference,
+    SourceInfo,
+    UncitedClaimChunk,
     ReferenceStats,
     ReferenceStatus,
     Report,
@@ -91,16 +93,57 @@ def build_reference_stats(
 
     times_cited: dict[str, int] = defaultdict(int)
     verdict_counts: dict[str, Counter] = defaultdict(Counter)
-    supporting_citations: dict[str, int] = defaultdict(int)
+    supports_pos: dict[str, list[int]] = defaultdict(list)
+    partial_pos: dict[str, list[int]] = defaultdict(list)
+    absent_pos: dict[str, list[int]] = defaultdict(list)
+    contradicts_pos: dict[str, list[int]] = defaultdict(list)
+    unrated_pos: dict[str, list[int]] = defaultdict(list)
+    key_excerpt: dict[str, str] = {}
+    key_excerpt_pos: dict[str, int] = {}
+    key_from_supports: set[str] = set()
 
     for chunk in chunks:
         result = result_by_chunk.get(chunk.id)
+        pr_by_ref = {pr.reference_id: pr for pr in result.per_reference} if result else {}
         for ref_id in chunk.cited_reference_ids:
             times_cited[ref_id] += 1
-            if result is not None:
-                verdict_counts[ref_id][result.verdict] += 1
-                if ref_id in result.supporting_reference_ids:
-                    supporting_citations[ref_id] += 1
+            if result is None:
+                continue
+            verdict_counts[ref_id][result.verdict] += 1
+            pr = pr_by_ref.get(ref_id)
+            relation = pr.relation if pr is not None else None
+            if relation is None and ref_id in result.supporting_reference_ids:
+                relation = "supports"  # fallback quando o juiz so preencheu o campo antigo
+            if relation == "supports":
+                supports_pos[ref_id].append(chunk.position)
+            elif relation == "partial":
+                partial_pos[ref_id].append(chunk.position)
+            elif relation == "contradicts":
+                contradicts_pos[ref_id].append(chunk.position)
+            elif relation == "absent":
+                absent_pos[ref_id].append(chunk.position)
+            elif result.per_reference:
+                # o juiz detalhou as fontes e deixou esta de fora → nao contribuiu
+                absent_pos[ref_id].append(chunk.position)
+            else:  # nenhum detalhamento por fonte neste veredito
+                unrated_pos[ref_id].append(chunk.position)
+
+            # trecho representativo: prioriza o excerto de um `supports`
+            if pr is not None and pr.excerpt:
+                if relation == "supports" and ref_id not in key_from_supports:
+                    key_excerpt[ref_id] = pr.excerpt
+                    key_excerpt_pos[ref_id] = chunk.position
+                    key_from_supports.add(ref_id)
+                elif ref_id not in key_excerpt:
+                    key_excerpt[ref_id] = pr.excerpt
+                    key_excerpt_pos[ref_id] = chunk.position
+            if (
+                ref_id not in key_excerpt
+                and ref_id in result.supporting_reference_ids
+                and result.cited_excerpts
+            ):
+                key_excerpt[ref_id] = result.cited_excerpts[0]
+                key_excerpt_pos[ref_id] = chunk.position
 
     stats = [
         ReferenceStats(
@@ -110,8 +153,16 @@ def build_reference_stats(
             supported_count=verdict_counts[ref.id].get(AuditVerdict.SUPPORTED, 0),
             unsupported_count=verdict_counts[ref.id].get(AuditVerdict.UNSUPPORTED, 0),
             contradicted_count=verdict_counts[ref.id].get(AuditVerdict.CONTRADICTED, 0),
-            supporting_citations=supporting_citations.get(ref.id, 0),
+            supporting_citations=len(supports_pos.get(ref.id, [])),
+            partial_citations=len(partial_pos.get(ref.id, [])),
             status=ref.status,
+            supports_positions=sorted(supports_pos.get(ref.id, [])),
+            partial_positions=sorted(partial_pos.get(ref.id, [])),
+            absent_positions=sorted(absent_pos.get(ref.id, [])),
+            contradicts_positions=sorted(contradicts_pos.get(ref.id, [])),
+            unrated_positions=sorted(unrated_pos.get(ref.id, [])),
+            key_excerpt=key_excerpt.get(ref.id, ""),
+            key_excerpt_position=key_excerpt_pos.get(ref.id),
         )
         for ref in references
     ]
@@ -132,6 +183,21 @@ def _multi_claim_chunks(chunks: list[AnswerChunk]) -> list[PotentiallyUnsourcedC
                 answer_chunk_id=chunk.id,
                 sentence_count=chunk.sentence_count,
                 cited_reference_ids=list(chunk.cited_reference_ids),
+                excerpt=excerpt if len(excerpt) <= 300 else excerpt[:299].rstrip() + "…",
+            )
+        )
+    return out
+
+
+def _uncited_claims(chunks: list[AnswerChunk]) -> list[UncitedClaimChunk]:
+    out: list[UncitedClaimChunk] = []
+    for chunk in chunks:
+        if not chunk.is_uncited_claim:
+            continue
+        excerpt = " ".join(chunk.text.split())
+        out.append(
+            UncitedClaimChunk(
+                answer_chunk_id=chunk.id,
                 excerpt=excerpt if len(excerpt) <= 300 else excerpt[:299].rstrip() + "…",
             )
         )
@@ -164,6 +230,7 @@ def aggregate_report(
     processing_time_seconds: float = 0.0,
     generated_at: datetime | None = None,
     judge_config: JudgeConfig | None = None,
+    source_info: SourceInfo | None = None,
 ) -> Report:
     """Monta o `Report` final de uma execucao — a peca que hoje nao existe
     em codigo algum nos tres repositorios originais; todo relatorio rico
@@ -182,7 +249,14 @@ def aggregate_report(
     partially_supported = sum(
         1 for r in results if r.verdict == AuditVerdict.SUPPORTED and r.unsupported_aspects
     )
-    uncredited_refs = sum(1 for s in reference_stats if s.times_cited > 0 and s.supporting_citations == 0)
+    uncredited_refs = sum(
+        1
+        for s in reference_stats
+        if s.times_cited > 0 and s.supporting_citations == 0 and s.partial_citations == 0
+    )
+
+    uncited_claims = _uncited_claims(chunks)
+    claim_chunks = sum(1 for c in chunks if c.cited_reference_ids or c.is_uncited_claim)
 
     return Report(
         run_id=run_id,
@@ -191,6 +265,7 @@ def aggregate_report(
         answer_path=answer_path,
         generated_at=generated_at or datetime.now(timezone.utc),
         judge_config=judge_config,
+        source_info=source_info,
         total_chunks=len(chunks),
         pct_supported=percentages["pct_supported"],
         pct_unsupported=percentages["pct_unsupported"],
@@ -212,6 +287,9 @@ def aggregate_report(
         skipped_chunks=skipped,
         reference_stats=reference_stats,
         potentially_unsourced_chunks=_multi_claim_chunks(chunks),
+        uncited_claims=uncited_claims,
+        count_uncited_claims=len(uncited_claims),
+        count_claim_chunks=claim_chunks,
         total_cost_usd=cost.total_cost_usd,
         total_tokens=cost.total_tokens,
         cost_tracked=cost_tracked,

@@ -100,9 +100,13 @@ julgamento, pula chunk a chunk os que já têm resultado — nada é refeito.
 `.md` / `.markdown` (instalação base); `.pdf` e `.docx` (extra `[ingestion]`).
 O arquivo é normalizado para markdown e precisa:
 
-1. **citar as fontes no corpo** com marcadores `[N]` (superscript em `.docx` é
-   convertido automaticamente para `[N]`);
+1. **citar as fontes no corpo** com marcadores `[N]` (superscript em `.docx` e
+   `<sup>N</sup>`/`[cite: N]` são convertidos automaticamente para `[N]`);
 2. **terminar com uma lista de referências**.
+
+Tabelas markdown no corpo (comuns em respostas do Gemini) são linearizadas
+antes do chunking — cada linha vira `célula — célula` — para não fragmentar a
+citação de cada célula num trecho ilegível.
 
 `RegexReferenceExtractor` reconhece, em ordem: marcador `[N] título` + URL
 (ChatGPT/Gemini), lista numerada após o separador `⁂` ou o cabeçalho da seção
@@ -126,11 +130,14 @@ inicial** (o *baseline*), em duas fases:
    pôde ser baixada (morta/inacessível), não há o que recuperar: o chunk **não
    é julgado**, vira `SKIPPED` no relatório e a auditoria continua.
 2. **Julgamento (1 chamada de LLM por chunk), serial.** O juiz recebe o texto do
-   chunk + o `CuratedDocument` e devolve o veredito (`SUPPORTED` /
+   chunk + o `CuratedDocument` e devolve o veredito do chunk (`SUPPORTED` /
    `UNSUPPORTED` / `CONTRADICTED`), a justificativa, os trechos literais que o
-   embasam, `supporting_reference_ids` e `unsupported_aspects`. Uma saída não
-   parseável não vira veredito — o chunk fica pendente para a próxima
-   `audit resume`.
+   embasam, `unsupported_aspects` e — para **cada** referência citada
+   individualmente — como aquela fonte se relaciona com a afirmação
+   (`per_reference`: `supports` / `partial` / `absent` / `contradicts` + trecho
+   literal). O veredito do chunk continua 3-classe; `per_reference` só o
+   detalha. Uma saída não parseável não vira veredito — o chunk fica pendente
+   para a próxima `audit resume`.
 
 `SUPPORTED` e `CONTRADICTED` do baseline são finais. Um **`UNSUPPORTED` não é**
 — ele entra na cascata abaixo. A busca no corpus inteiro (ignorando a citação)
@@ -168,9 +175,14 @@ se continuar sem evidência → segue para a Etapa B.
 
 **B — Varredura do documento citado inteiro.** Sem recuperação: lê o markdown
 completo de cada referência citada, fatia em janelas grandes e pergunta ao
-juiz, janela a janela, se ela sustenta / contradiz / não trata o claim.
-Encontrou suporte → `SUPPORTED`. Encontrou contradição → `CONTRADICTED`. Nada em
-nenhuma janela → o `UNSUPPORTED` fica **confirmado** (`unsupported_confirmed`):
+juiz, janela a janela, se ela sustenta a afirmação **inteira** / sustenta só
+**parte** dela / contradiz / não trata o claim. Encontrou suporte total →
+`SUPPORTED`. Encontrou contradição → `CONTRADICTED`. Alguma janela sustenta
+parte da afirmação (mas nenhuma sustenta o todo) → continua `UNSUPPORTED`
+(a afirmação como enunciada não se sustenta), a fonte é anotada como `partial`
+e o `unsupported_confirmed` **não** é marcado — parte do fato está, de fato, na
+fonte. Nada em nenhuma janela de nenhuma fonte → o `UNSUPPORTED` fica
+**confirmado** (`unsupported_confirmed`) e cada fonte citada vira `absent`:
 o claim comprovadamente não está na fonte citada.
 
 **C — Checagem cruzada no corpus.** Busca evidência em **todas** as referências
@@ -197,11 +209,17 @@ Cada run gera `data/runs/<run_id>/report.md` (legível) e `report.json` (mesmos
 dados). Seções — numeração dinâmica, as condicionais são omitidas quando não se
 aplicam:
 
-1. **Metadados** — run id, ferramenta, arquivo auditado, tempo de processamento
-   (`dias:horas:min:seg`), modelo/provider/parâmetros do juiz usados na run.
+1. **Metadados** — run id, ferramenta, tempo de processamento
+   (`dias:horas:min:seg`), modelo/provider/parâmetros do juiz; e um bloco
+   **Arquivo de origem** (forense, sem LLM): formato/tamanho, páginas,
+   Creator/Producer, `/Title`·`/Author`, datas internas, criptografia,
+   nº de marcadores `[N]` no corpo (total e distintos) vs referências
+   listadas. Aponta quando o PDF é impressão de navegador (Skia/PDF +
+   Chromium) ou quando há marcadores sem entrada correspondente.
 2. **Distribuição de Vereditos** — contagem e % de
    SUPPORTED/UNSUPPORTED/CONTRADICTED (e SKIPPED, quando houver); quantos dos
-   SUPPORTED são **parcialmente suportados** (têm `unsupported_aspects`).
+   SUPPORTED são **parcialmente suportados** (têm `unsupported_aspects`); e
+   quantos trechos com afirmação factual não têm **nenhuma** citação.
 3. **Verificação de UNSUPPORTED** — quantos `UNSUPPORTED` iniciais foram
    **confirmados**, quantos foram **reclassificados** (por etapa) e quantos são
    **provável erro de citação** (corroborados por outra referência).
@@ -209,21 +227,32 @@ aplicam:
    tabela de preços (ex: `openai`), a seção avisa que o custo é um piso, não o
    valor real (só `anthropic` com modelo tabelado e execução local são
    contabilizados).
-5. **Análise por Referência** — por referência: status, nº de citações, coluna
-   **Suporte** (`M/N` = quantas dessas citações realmente tiveram nela evidência
-   de suporte), e distribuição de veredito. Sinaliza referências citadas mas
-   nunca creditadas como fonte de suporte.
-6. **Referências Mortas e Inacessíveis** — HTTP 404 e 403/timeout/SSL após
+5. **Análise por Referência** — uma linha por referência: status e o total de
+   citações aberto em **Sustenta / Parcial / Não sustenta** (relação da própria
+   fonte com a afirmação — os três somam o total). Sinaliza referências citadas
+   que nunca sustentaram (nem parcialmente) nada e referências listadas mas
+   nunca citadas.
+6. **Tabela de Verificação por Fonte** — a mesma lista, mas por conteúdo: uma
+   linha por **referência citada**, com as **posições dos trechos** (`#N`) que
+   ela sustenta / sustenta em parte / não sustenta (`⚡` = contradiz), e um
+   trecho literal representativo da fonte prefixado pelo `#N` do trecho da
+   resposta para o qual serve de evidência. É a "tabela de verificação de
+   conteúdo" de uma auditoria manual, sem repetir a mesma referência.
+7. **Referências Mortas e Inacessíveis** — HTTP 404 e 403/timeout/SSL após
    esgotar as estratégias de fetch (`curl_cffi` com fingerprint de navegador →
    cloudscraper → playwright), com teto de tempo por referência e uma 2ª
    tentativa só para falhas possivelmente transitórias.
-7. **Exemplos por Veredito** — até 3 por veredito, com trecho, justificativa,
-   evidência literal, quais referências sustentaram, aspectos não cobertos e — se
+8. **Exemplos por Veredito** — até 3 por veredito, com trecho, justificativa,
+   evidência literal, aspectos não cobertos, uma tabela por fonte citada e — se
    reclassificado — o que o baseline dizia + trilha da cascata.
-8. **Afirmações Possivelmente sem Fonte** — chunks com ≥3 frases em que só a
-   última está ancorada por uma citação (as anteriores podem estar sem fonte).
-9. **Chunks Não Auditados** — chunks pulados, agrupados por motivo (não citam
-   nada / citam referência não baixada).
+9. **Afirmações sem Citação** — parágrafos que fazem afirmação factual e não
+   têm marcador `[N]` nenhum. O `AnswerChunker` ancora a citação no parágrafo
+   em que ela aparece; parágrafos anteriores sem marcador próprio caem aqui e
+   **não** são julgados contra a citação do vizinho.
+10. **Chunks Citados com Várias Afirmações** — heurística complementar: chunk
+    citado com ≥3 frases em que só a última está adjacente à citação.
+11. **Chunks Não Auditados** — chunks pulados, agrupados por motivo (não citam
+    nada / citam referência não baixada).
 
 ## Estrutura
 
@@ -233,7 +262,7 @@ src/auditframework/
 ├── pipeline.py       # Pipeline + RunContext + 5 estágios
 ├── config.py         # Settings (pydantic-settings, lê .env)
 ├── models/           # contrato Pydantic compartilhado
-├── extraction/       # resposta → Reference (extração de citações)
+├── extraction/       # resposta → Reference (citações) + SourceInfo (forense do arquivo)
 ├── ingestion/        # Reference → Document (download + conversão; Reddit via API .json)
 ├── indexing/         # chunking de documentos, embeddings, FAISS, retrieval
 ├── judging/          # juiz LLM

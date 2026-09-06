@@ -54,6 +54,7 @@ class ContextExpansionStage:
             cited_excerpts=result.cited_excerpts,
             supporting_reference_ids=result.supporting_reference_ids,
             unsupported_aspects=result.unsupported_aspects,
+            per_reference=result.per_reference,
             note=result.justification,
             prompt_tokens=result.prompt_tokens,
             completion_tokens=result.completion_tokens,

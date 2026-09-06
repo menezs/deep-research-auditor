@@ -17,6 +17,11 @@ class AnswerChunk(BaseModel):
     pela citacao — as frases anteriores podem carregar afirmacoes sem
     fonte associada (ver secao "Afirmacoes possivelmente sem fonte" no
     relatorio)."""
+    is_uncited_claim: bool = False
+    """Paragrafo que faz afirmacao factual mas nao tem nenhuma citacao —
+    separado de um chunk citado por fronteira de paragrafo (o `AnswerChunker`
+    ancora o marcador `[N]` so no paragrafo em que ele aparece). Nao e
+    julgado (vira SKIPPED), mas e listado em "Afirmacoes sem Citacao"."""
 
 
 class ReferenceChunk(BaseModel):

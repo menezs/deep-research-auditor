@@ -90,3 +90,75 @@ def test_sentence_count_flags_multi_claim_chunks():
 def test_single_sentence_chunk_has_sentence_count_one():
     chunks = AnswerChunker().chunk("Uma afirmação só [1]", answer_id="a1", references=[_ref("refA", ["[1]"])])
     assert chunks[0].sentence_count == 1
+
+
+def test_uncited_paragraph_before_a_citation_is_split_off_as_uncited_claim():
+    """Regressao samsung: um parágrafo sem marcador que precede um parágrafo
+    citado NÃO deve ser julgado contra a citação do vizinho."""
+    text = (
+        "A Samsung foi fundada em 1938 por Lee Byung-chul. [1]\n\n"
+        "Com o tempo, a companhia investiu fortemente em semicondutores, telas e "
+        "telefones móveis, tornando-se uma marca global.\n\n"
+        "Hoje é um dos maiores conglomerados da Coreia do Sul. [2]"
+    )
+    refs = [_ref("refA", ["[1]"]), _ref("refB", ["[2]"])]
+
+    chunks = AnswerChunker().chunk(text, answer_id="a1", references=refs)
+
+    cited = {tuple(c.cited_reference_ids): c for c in chunks if c.cited_reference_ids}
+    assert set(cited) == {("refA",), ("refB",)}
+    # o parágrafo dos semicondutores fica isolado, sem citação
+    uncited = [c for c in chunks if c.is_uncited_claim]
+    assert len(uncited) == 1
+    assert "semicondutores" in uncited[0].text
+    assert uncited[0].cited_reference_ids == []
+    # e o chunk citado por [2] é só a última frase, não o parágrafo anterior
+    assert "semicondutores" not in cited[("refB",)].text
+    assert "conglomerados" in cited[("refB",)].text
+
+
+def test_same_paragraph_sentences_stay_with_the_trailing_citation():
+    """Frases do MESMO parágrafo que a citação continuam ancoradas por ela
+    (não viram 'sem citação')."""
+    text = "Primeira frase da ideia. Segunda frase, agora com fonte. [1]"
+    chunks = AnswerChunker().chunk(text, answer_id="a1", references=[_ref("refA", ["[1]"])])
+
+    assert len(chunks) == 1
+    assert chunks[0].cited_reference_ids == ["refA"]
+    assert chunks[0].is_uncited_claim is False
+    assert "Primeira frase" in chunks[0].text
+
+
+def test_heading_and_tag_artifacts_are_dropped_not_flagged():
+    text = "</u>\n\n## Um cabeçalho qualquer\n\nNas décadas seguintes a empresa cresceu muito. [1]"
+    chunks = AnswerChunker().chunk(text, answer_id="a1", references=[_ref("refA", ["[1]"])])
+
+    assert len(chunks) == 1
+    assert chunks[0].cited_reference_ids == ["refA"]
+    assert "cabeçalho" not in chunks[0].text
+    assert "</u>" not in chunks[0].text
+
+
+def test_markdown_tables_are_linearized_not_fragmented():
+    text = (
+        "Introdução em prosa normal. [1]\n\n"
+        "|**Ano**|**Evento**|**Significado**|\n"
+        "|---|---|---|\n"
+        "|**1938**|Fundação da Samsung<br>em Taegu<sup>2</sup>|Início como casa comercial<sup>2</sup>.|\n"
+        "|**1969**|Criação da<br>Samsung Electronics<sup>3</sup>|Entrada no setor eletrónico<sup>3</sup>.|\n\n"
+        "Parágrafo final. [1]"
+    )
+    refs = [_ref("refA", ["[1]"]), _ref("refB", ["[2]"]), _ref("refC", ["[3]"])]
+
+    chunks = AnswerChunker().chunk(text, answer_id="a1", references=refs)
+
+    # nenhum chunk com lixo de tabela
+    for c in chunks:
+        assert "|" not in c.text and "<br>" not in c.text and not c.text.startswith((".", "—"))
+    # a linha da tabela virou um chunk coerente e citado
+    row = next(c for c in chunks if "1938" in c.text)
+    assert "Fundação da Samsung" in row.text
+    assert row.cited_reference_ids == ["refB"]
+    # o cabeçalho da tabela (sem citação, curto) foi descartado, não virou "sem citação"
+    assert not any("Significado" in c.text for c in chunks)
+    assert not any(c.is_uncited_claim for c in chunks)

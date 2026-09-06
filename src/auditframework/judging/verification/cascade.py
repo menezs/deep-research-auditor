@@ -10,7 +10,7 @@ from ...indexing.vector_store import VectorStore
 from ...ingestion.registry import ReferenceRegistry
 from ...common.llm_client import LLMClient
 from ...logging_config import get_logger
-from ...models import AnswerChunk, AuditResult, AuditVerdict, VerificationStep
+from ...models import AnswerChunk, AuditResult, AuditVerdict, ReferenceVerdict, VerificationStep
 from ..judge import Verifier
 
 logger = get_logger(__name__)
@@ -39,6 +39,7 @@ class StageOutcome:
     cited_excerpts: list[str] = field(default_factory=list)
     supporting_reference_ids: list[str] = field(default_factory=list)
     unsupported_aspects: list[str] = field(default_factory=list)
+    per_reference: list[ReferenceVerdict] = field(default_factory=list)
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cost_usd: float = 0.0
@@ -97,6 +98,11 @@ class VerificationCascade:
             result.contradicted_by_other_reference = _dedup(
                 result.contradicted_by_other_reference + outcome.contradicted_by
             )
+
+            if outcome.per_reference:
+                # uma etapa mais completa (varredura do doc inteiro) tem a
+                # palavra final sobre a relacao de cada fonte citada
+                result.per_reference = outcome.per_reference
 
             if outcome.verdict != AuditVerdict.UNSUPPORTED:
                 result.verdict = outcome.verdict

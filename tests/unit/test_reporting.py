@@ -501,7 +501,7 @@ class TestCitationLevelAndUnsourced:
         assert report.uncredited_reference_count == 0  # r1 e r2 ambas creditadas ao menos 1x
 
         markdown = render_markdown(report)
-        assert "| Referência | Status | Citações | Suporte |" in markdown
+        assert "| Referência | Status | Citada | Sustenta | Parcial | Não sustenta † |" in markdown
 
     def test_reference_cited_but_never_supporting_is_flagged(self):
         chunks = [_chunk("c1", ["r1", "r2"])]
@@ -511,7 +511,31 @@ class TestCitationLevelAndUnsourced:
             chunks=chunks, references=[_reference("r1"), _reference("r2")], results=results,
         )
         assert report.uncredited_reference_count == 1  # r2
-        assert "nunca creditadas como fonte de suporte" in render_markdown(report)
+        assert "nunca sustentaram" in render_markdown(report)
+
+    def test_per_reference_relations_feed_reference_stats(self):
+        from auditframework.models import ReferenceVerdict
+
+        chunks = [_chunk("c1", ["r1", "r2"])]
+        results = [
+            _result(
+                "c1", AuditVerdict.SUPPORTED,
+                per_reference=[
+                    ReferenceVerdict(reference_id="r1", relation="partial", excerpt="parte"),
+                    ReferenceVerdict(reference_id="r2", relation="supports", excerpt="tudo"),
+                ],
+            )
+        ]
+        report = aggregate_report(
+            run_id="run-1", answer_id="a1", tool_name="ChatGPT",
+            chunks=chunks, references=[_reference("r1"), _reference("r2")], results=results,
+        )
+        stats = {s.reference_id: s for s in report.reference_stats}
+        assert stats["r1"].partial_citations == 1 and stats["r1"].supporting_citations == 0
+        assert stats["r2"].supporting_citations == 1 and stats["r2"].partial_citations == 0
+        assert report.uncredited_reference_count == 0  # r1 contribuiu parcialmente
+        md = render_markdown(report, chunks=chunks, results=results)
+        assert "Verificação por fonte" in md and "parcial" in md and "sustenta" in md
 
     def test_partially_supported_count_and_note(self):
         chunks = [_chunk("c1", ["r1"]), _chunk("c2", ["r1"])]
@@ -541,8 +565,92 @@ class TestCitationLevelAndUnsourced:
         )
         assert [c.answer_chunk_id for c in report.potentially_unsourced_chunks] == ["c1"]
         markdown = render_markdown(report)
-        assert "## " in markdown and "Afirmações Possivelmente sem Fonte" in markdown
+        assert "## " in markdown and "Chunks Citados com Várias Afirmações" in markdown
         assert "3 frases" in markdown
+
+    def test_uncited_claim_section_lists_paragraphs_without_any_citation(self):
+        chunks = [
+            AnswerChunk(
+                id="c0", answer_id="a1", position=0,
+                text="A empresa investiu pesado em pesquisa e desenvolvimento ao longo da década.",
+                cited_reference_ids=[], is_uncited_claim=True,
+            ),
+            AnswerChunk(
+                id="c1", answer_id="a1", position=1,
+                text="Hoje é líder de mercado.", cited_reference_ids=["r1"],
+            ),
+        ]
+        report = aggregate_report(
+            run_id="run-1", answer_id="a1", tool_name="ChatGPT",
+            chunks=chunks, references=[_reference("r1")],
+            results=[_result("c1", AuditVerdict.SUPPORTED)],
+        )
+        assert report.count_uncited_claims == 1
+        assert report.count_claim_chunks == 2
+        assert [c.answer_chunk_id for c in report.uncited_claims] == ["c0"]
+        markdown = render_markdown(report)
+        assert "Afirmações sem Citação" in markdown
+        assert "1 de 2" in markdown
+
+    def test_content_verification_table_has_one_row_per_cited_source(self):
+        from auditframework.models import ReferenceVerdict
+
+        chunks = [
+            AnswerChunk(id="c1", answer_id="a1", position=3, text="A empresa foi fundada em 1938.",
+                        cited_reference_ids=["r1", "r2"]),
+        ]
+        results = [
+            _result(
+                "c1", AuditVerdict.SUPPORTED,
+                per_reference=[ReferenceVerdict(reference_id="r1", relation="supports", excerpt="founded in 1938")],
+            )
+        ]
+        report = aggregate_report(
+            run_id="run-1", answer_id="a1", tool_name="ChatGPT",
+            chunks=chunks, references=[_reference("r1"), _reference("r2")], results=results,
+        )
+        stats = {s.reference_id: s for s in report.reference_stats}
+        # r1 detalhada como supports; r2 citada e deixada de fora -> ausente
+        assert stats["r1"].supports_positions == [3] and stats["r1"].absent_positions == []
+        assert stats["r2"].absent_positions == [3] and stats["r2"].supports_positions == []
+        md = render_markdown(report, chunks=chunks, references=[_reference("r1"), _reference("r2")], results=results)
+        section6 = md.split("Tabela de Verificação por Fonte", 1)[1].split("\n---\n", 1)[0]
+        assert "founded in 1938" in section6
+        # uma linha por referência citada: r1 e r2, sem repetição
+        assert section6.count("| [[r1]]") == 1
+        assert section6.count("| [[r2]]") == 1
+        assert "#3" in section6  # posição do trecho, não o id do chunk
+
+    def test_content_verification_table_is_omitted_without_per_source_data(self):
+        chunks = [_chunk("c1", ["r1"])]
+        results = [_result("c1", AuditVerdict.SUPPORTED)]  # sem per_reference, sem supporting_ids
+        report = aggregate_report(
+            run_id="run-1", answer_id="a1", tool_name="ChatGPT",
+            chunks=chunks, references=[_reference("r1")], results=results,
+        )
+        stats = {s.reference_id: s for s in report.reference_stats}
+        assert stats["r1"].unrated_positions == [0]
+        assert "Tabela de Verificação por Fonte" not in render_markdown(report, chunks=chunks, results=results)
+
+    def test_source_info_block_renders_in_metadata(self):
+        from auditframework.models import SourceInfo
+
+        report = aggregate_report(
+            run_id="run-1", answer_id="a1", tool_name="Perplexity",
+            chunks=[_chunk("c1", ["r1"])], references=[_reference("r1")], results=[],
+            source_info=SourceInfo(
+                format=".pdf", size_bytes=269891, page_count=2,
+                pdf_creator="Chromium", pdf_producer="Skia/PDF m127",
+                created="2026-08-30 18:33:46 UTC", browser_print=True,
+                citation_markers_total=6, citation_markers_distinct=4,
+                references_listed=15, references_never_cited=11,
+            ),
+        )
+        md = render_markdown(report)
+        assert "Arquivo de origem" in md
+        assert "6 marcadores, 4 distintos" in md
+        assert "15 (11 nunca citadas)" in md
+        assert "impressão de navegador" in md
 
     def test_skipped_reasons_are_grouped(self):
         chunks = [_chunk("c1", []), _chunk("c2", ["r1"])]

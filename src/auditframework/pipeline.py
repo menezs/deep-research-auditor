@@ -33,7 +33,16 @@ from .ingestion.registry import ReferenceRegistry
 from .judging.judge import Verifier
 from .judging.verification import build_verification_cascade
 from .logging_config import STAGE_COLORS, get_logger, stage_banner, stage_done, stage_skipped
-from .models import AnswerChunk, AuditResult, AuditVerdict, CuratedDocument, JudgeConfig, SkippedChunk
+from .extraction.source_info import build_source_info
+from .models import (
+    AnswerChunk,
+    AuditResult,
+    AuditVerdict,
+    CuratedDocument,
+    JudgeConfig,
+    SkippedChunk,
+    SourceInfo,
+)
 from .reporting.aggregator import aggregate_report
 from .reporting.render import render_json, render_markdown
 
@@ -155,6 +164,17 @@ def _load_answer_chunks(run_dir: Path) -> list[AnswerChunk]:
     return [AnswerChunk.model_validate(item) for item in raw]
 
 
+def _save_source_info(run_dir: Path, source_info: SourceInfo) -> None:
+    (run_dir / "source_info.json").write_text(source_info.model_dump_json(indent=2), encoding="utf-8")
+
+
+def _load_source_info(run_dir: Path) -> SourceInfo | None:
+    path = run_dir / "source_info.json"
+    if not path.exists():  # runs anteriores a este campo
+        return None
+    return SourceInfo.model_validate_json(path.read_text(encoding="utf-8"))
+
+
 def load_audit_results(path: Path) -> list[AuditResult]:
     if not path.exists():
         return []
@@ -203,6 +223,11 @@ class ExtractionStage:
         chunks = AnswerChunker().chunk(body, answer_id=ctx.run_id, references=references)
         _save_answer_chunks(ctx.run_dir, chunks)
         logger.info("Resposta dividida em %d chunks", len(chunks))
+
+        source_info = build_source_info(
+            path=ctx.answer_path, body=body, references=references, chunks=chunks
+        )
+        _save_source_info(ctx.run_dir, source_info)
 
 
 class IngestionStage:
@@ -411,6 +436,7 @@ class ReportingStage:
             skipped=skipped,
             processing_time_seconds=processing_time,
             judge_config=judge_config,
+            source_info=_load_source_info(ctx.run_dir),
         )
         (ctx.run_dir / "report.md").write_text(
             render_markdown(report, chunks=chunks, references=references, results=results), encoding="utf-8"
@@ -453,12 +479,13 @@ _SMALL_MODEL_RE = re.compile(r"\b(?:[0-7](?:\.\d)?|e[0-7])\s?b\b", re.IGNORECASE
 
 
 def _looks_like_small_model(model: str) -> bool:
-    """Heuristica grosseira pelo nome: sugere um juiz com menos de ~8B de
-    parametros (ex: `gemma-4-e4b`, `qwen2.5-3b`, `phi-3-mini`,
-    `llama-3.2-1b`), pequeno demais para julgar com precisao contextos de
-    varios milhares de tokens."""
+    """Heuristica grosseira pelo nome: sugere um juiz de baixa capacidade
+    para julgamento — ou pelo tamanho declarado (`gemma-4-e4b`, `qwen2.5-3b`,
+    `phi-3-mini`, `llama-3.2-1b`), ou por ser uma variante "econômica"
+    (`*-flash`, `*-lite`, `*-nano`, `*-fast`, `*-mini`), pequena/destilada
+    demais para julgar com precisao contextos de varios milhares de tokens."""
     lowered = model.lower()
-    if any(tag in lowered for tag in ("mini", "small", "tiny")):
+    if any(tag in lowered for tag in ("mini", "small", "tiny", "flash", "lite", "nano", "fast", "distill")):
         return True
     return bool(_SMALL_MODEL_RE.search(lowered))
 

@@ -243,6 +243,22 @@ class TestFullDocumentScanStage:
             _FakeRegistry({"refA": "# Doc\n\n" + ("texto irrelevante. " * 80)}, tmp_path),
             _WindowLLM({}), window_tokens=120, window_overlap=10,
         )
-        outcome = stage.run(_chunk(cited=["refA"]), _baseline())
+        outcome = stage.run(_chunk(cited=["refA", "refB"]), _baseline())
         assert outcome.verdict == AuditVerdict.UNSUPPORTED
         assert outcome.inconclusive is False
+        # afirmacao comprovadamente ausente de cada fonte varrida
+        assert {(pr.reference_id, pr.relation) for pr in outcome.per_reference} == {("refA", "absent")}
+
+    def test_partial_window_annotates_partial_and_stays_unconfirmed(self, tmp_path):
+        pytest.importorskip("semantic_text_splitter")
+        doc = "# Doc\n\n" + ("texto neutro. " * 60) + "\n\nPARTE_DO_FATO aparece aqui.\n\n" + ("mais. " * 60)
+        stage = FullDocumentScanStage(
+            _FakeRegistry({"refA": doc, "refB": "# B\n\n" + ("nada a ver. " * 80)}, tmp_path),
+            _WindowLLM({"PARTE_DO_FATO": "partial"}), window_tokens=120, window_overlap=10,
+        )
+        outcome = stage.run(_chunk(cited=["refA", "refB"]), _baseline())
+        assert outcome.verdict == AuditVerdict.UNSUPPORTED
+        # nao e "confirmado ausente" — parte do fato esta na fonte
+        assert outcome.inconclusive is True
+        rel = {pr.reference_id: pr.relation for pr in outcome.per_reference}
+        assert rel == {"refA": "partial", "refB": "absent"}

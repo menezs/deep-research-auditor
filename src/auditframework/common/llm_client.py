@@ -66,10 +66,25 @@ def _extract_bare_object(text: str) -> str | None:
     return match.group(0) if match else None
 
 
+def _tighten_object_schema(node: dict) -> None:
+    """OpenAI strict mode exige `additionalProperties: false` e `required`
+    com TODAS as chaves em cada objeto — inclusive nos `$defs` de modelos
+    aninhados (ex: `ReferenceVerdict` dentro de `JudgeOutput`)."""
+    if node.get("type") == "object" and "properties" in node:
+        node["additionalProperties"] = False
+        node["required"] = list(node["properties"].keys())
+        for prop in node["properties"].values():
+            _tighten_object_schema(prop)
+    for key in ("items", "prefixItems"):
+        if isinstance(node.get(key), dict):
+            _tighten_object_schema(node[key])
+    for sub in node.get("$defs", {}).values():
+        _tighten_object_schema(sub)
+
+
 def _json_schema_response_format(schema: type[BaseModel]) -> dict:
     json_schema = dict(schema.model_json_schema())
-    json_schema["additionalProperties"] = False
-    json_schema["required"] = list(json_schema.get("properties", {}).keys())
+    _tighten_object_schema(json_schema)
     return {
         "type": "json_schema",
         "json_schema": {"name": schema.__name__, "schema": json_schema, "strict": True},
