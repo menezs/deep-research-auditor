@@ -36,6 +36,11 @@ class ReferenceStats(BaseModel):
     unrated_positions: list[int] = Field(default_factory=list)
     """Citada, mas o juiz nao detalhou a relacao desta fonte especifica
     (sem `per_reference` nem credito em `supporting_reference_ids`)."""
+    not_audited_positions: list[int] = Field(default_factory=list)
+    """Citada por um chunk que NAO foi julgado — chunk SKIPPED (em geral
+    porque a propria fonte, ou todas as que ele cita, estao inacessiveis)
+    ou ainda pendente. `supports + partial + absent + contradicts +
+    unrated + not_audited` = `times_cited`."""
     key_excerpt: str = ""
     """Um trecho literal da fonte, representativo do que ela sustenta —
     preferencialmente vindo de um veredito `supports`."""
@@ -60,6 +65,20 @@ class UncitedClaimChunk(BaseModel):
 
     answer_chunk_id: str
     excerpt: str
+
+
+class CitationIssue(BaseModel):
+    """Trecho `UNSUPPORTED` pela fonte citada, mas cuja afirmacao aparece
+    (ou e contradita) em OUTRA referencia baixada — deteccao da Etapa C
+    (`cross_reference`). O veredito continua UNSUPPORTED; isto sinaliza
+    citacao provavelmente trocada, nao alegacao infundada."""
+
+    answer_chunk_id: str
+    position: int
+    claim_excerpt: str
+    cited_markers: str
+    corroborating_markers: str = ""
+    contradicting_markers: str = ""
 
 
 class SourceInfo(BaseModel):
@@ -162,6 +181,9 @@ class Report(BaseModel):
     reference_stats: list[ReferenceStats] = Field(default_factory=list)
     potentially_unsourced_chunks: list[PotentiallyUnsourcedChunk] = Field(default_factory=list)
     uncited_claims: list[UncitedClaimChunk] = Field(default_factory=list)
+    citation_issues: list[CitationIssue] = Field(default_factory=list)
+    """Detalhe da linha "provável erro de citação" da seção de verificação:
+    um item por chunk UNSUPPORTED corroborado/contradito por outra fonte."""
 
     total_cost_usd: float = 0.0
     total_tokens: int = 0

@@ -137,6 +137,35 @@ class TestBuildReferenceStats:
         assert stats_by_id["r2"].unsupported_count == 0
         assert stats_by_id["r2"].contradicted_count == 0
 
+    def test_skipped_citation_counts_as_not_audited_and_columns_sum_to_times_cited(self):
+        """Um chunk que cita a fonte mas foi SKIPPED (sem AuditResult) entra
+        em `not_audited_positions`, nao some da contagem."""
+        references = [_reference("r1")]
+        chunks = [
+            AnswerChunk(id="c1", answer_id="a1", position=0, text="t", cited_reference_ids=["r1"]),
+            AnswerChunk(id="c2", answer_id="a1", position=1, text="t", cited_reference_ids=["r1"]),
+        ]
+        results = [_result("c1", AuditVerdict.SUPPORTED, supporting_reference_ids=["r1"])]  # c2 pulado
+
+        s = build_reference_stats(chunks, references, results)[0]
+        assert s.times_cited == 2
+        assert s.not_audited_positions == [1]
+        total = (
+            len(s.supports_positions) + len(s.partial_positions) + len(s.absent_positions)
+            + len(s.contradicts_positions) + len(s.unrated_positions) + len(s.not_audited_positions)
+        )
+        assert total == s.times_cited
+
+    def test_citations_of_non_downloaded_reference_are_not_audited_even_when_chunk_is_judged(self):
+        references = [_reference("r1", status=ReferenceStatus.INACCESSIBLE), _reference("r2")]
+        chunks = [AnswerChunk(id="c1", answer_id="a1", position=0, text="t", cited_reference_ids=["r1", "r2"])]
+        results = [_result("c1", AuditVerdict.SUPPORTED, supporting_reference_ids=["r2"])]
+
+        stats = {st.reference_id: st for st in build_reference_stats(chunks, references, results)}
+        assert stats["r1"].not_audited_positions == [0]
+        assert stats["r1"].absent_positions == []  # nao inventa um "absent" contra fonte nao lida
+        assert stats["r2"].supports_positions == [0]
+
 
 class TestAggregateReport:
     def test_percentages_and_totals_are_computed_correctly(self):
@@ -482,6 +511,31 @@ class TestVerificationSection:
         assert "## 3. Verificação de UNSUPPORTED" in markdown
         assert "confirmados" in markdown and "reclassificados" in markdown
         assert "provável erro de citação" in markdown
+
+    def test_citation_issues_section_lists_corroborating_markers(self):
+        chunks = [
+            AnswerChunk(id="c1", answer_id="a1", position=7,
+                        text="O adenocarcinoma representa 90% dos casos.", cited_reference_ids=["r1"]),
+        ]
+        results = [
+            _verified_result("c1", AuditVerdict.UNSUPPORTED, confirmed=True, corroborated=("r2", "r3"),
+                             trail_stages=("baseline", "context_expansion", "full_doc_scan", "cross_reference")),
+        ]
+        report = aggregate_report(
+            run_id="run-1", answer_id="a1", tool_name="ChatGPT",
+            chunks=chunks, references=[_reference("r1"), _reference("r2"), _reference("r3")], results=results,
+        )
+        assert len(report.citation_issues) == 1
+        issue = report.citation_issues[0]
+        assert issue.position == 7
+        assert issue.cited_markers == "[r1]"
+        assert issue.corroborating_markers == "[r2] [r3]"
+
+        md = render_markdown(report, chunks=chunks, references=[_reference("r1"), _reference("r2"), _reference("r3")], results=results)
+        assert "Prováveis Erros de Citação" in md
+        assert "`#7`" in md
+        # o exemplo mostra os marcadores legíveis, não os ids
+        assert "corroborada por outra fonte não citada: [r2] [r3]" in md
 
 
 class TestCitationLevelAndUnsourced:

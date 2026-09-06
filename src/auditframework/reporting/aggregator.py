@@ -7,6 +7,7 @@ from ..models import (
     AnswerChunk,
     AuditResult,
     AuditVerdict,
+    CitationIssue,
     JudgeConfig,
     PotentiallyUnsourcedChunk,
     Reference,
@@ -98,9 +99,12 @@ def build_reference_stats(
     absent_pos: dict[str, list[int]] = defaultdict(list)
     contradicts_pos: dict[str, list[int]] = defaultdict(list)
     unrated_pos: dict[str, list[int]] = defaultdict(list)
+    not_audited_pos: dict[str, list[int]] = defaultdict(list)
     key_excerpt: dict[str, str] = {}
     key_excerpt_pos: dict[str, int] = {}
     key_from_supports: set[str] = set()
+
+    downloaded = {ref.id for ref in references if ref.status == ReferenceStatus.DOWNLOADED}
 
     for chunk in chunks:
         result = result_by_chunk.get(chunk.id)
@@ -108,8 +112,15 @@ def build_reference_stats(
         for ref_id in chunk.cited_reference_ids:
             times_cited[ref_id] += 1
             if result is None:
+                # chunk SKIPPED (ou pendente) — nao ha veredito contra esta fonte
+                not_audited_pos[ref_id].append(chunk.position)
                 continue
             verdict_counts[ref_id][result.verdict] += 1
+            if ref_id not in downloaded:
+                # a fonte nao foi baixada: um "absent" do juiz aqui seria chute,
+                # nao uma verificacao — trata como nao auditada contra a fonte
+                not_audited_pos[ref_id].append(chunk.position)
+                continue
             pr = pr_by_ref.get(ref_id)
             relation = pr.relation if pr is not None else None
             if relation is None and ref_id in result.supporting_reference_ids:
@@ -161,6 +172,7 @@ def build_reference_stats(
             absent_positions=sorted(absent_pos.get(ref.id, [])),
             contradicts_positions=sorted(contradicts_pos.get(ref.id, [])),
             unrated_positions=sorted(unrated_pos.get(ref.id, [])),
+            not_audited_positions=sorted(not_audited_pos.get(ref.id, [])),
             key_excerpt=key_excerpt.get(ref.id, ""),
             key_excerpt_position=key_excerpt_pos.get(ref.id),
         )
@@ -201,6 +213,46 @@ def _uncited_claims(chunks: list[AnswerChunk]) -> list[UncitedClaimChunk]:
                 excerpt=excerpt if len(excerpt) <= 300 else excerpt[:299].rstrip() + "…",
             )
         )
+    return out
+
+
+def _trim(text: str, limit: int) -> str:
+    text = " ".join((text or "").split())
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def _citation_issues(
+    chunks: list[AnswerChunk], references: list[Reference], results: list[AuditResult]
+) -> list[CitationIssue]:
+    """Chunks `UNSUPPORTED` cuja afirmacao foi corroborada (ou contradita)
+    por OUTRA referencia baixada na Etapa C — detalha a contagem "provavel
+    erro de citacao" da secao de verificacao."""
+    chunk_by_id = {c.id: c for c in chunks}
+    markers = {r.id: (" ".join(r.citation_markers) or r.raw_url) for r in references}
+
+    def to_markers(ids: list[str]) -> str:
+        return " ".join(markers.get(i, i) for i in ids)
+
+    out: list[CitationIssue] = []
+    for result in results:
+        if result.verdict != AuditVerdict.UNSUPPORTED:
+            continue
+        if not (result.corroborated_by_other_reference or result.contradicted_by_other_reference):
+            continue
+        chunk = chunk_by_id.get(result.answer_chunk_id)
+        if chunk is None:
+            continue
+        out.append(
+            CitationIssue(
+                answer_chunk_id=chunk.id,
+                position=chunk.position,
+                claim_excerpt=_trim(chunk.text, 200),
+                cited_markers=to_markers(chunk.cited_reference_ids) or "(nenhuma)",
+                corroborating_markers=to_markers(result.corroborated_by_other_reference),
+                contradicting_markers=to_markers(result.contradicted_by_other_reference),
+            )
+        )
+    out.sort(key=lambda i: i.position)
     return out
 
 
@@ -252,7 +304,11 @@ def aggregate_report(
     uncredited_refs = sum(
         1
         for s in reference_stats
-        if s.times_cited > 0 and s.supporting_citations == 0 and s.partial_citations == 0
+        if s.status == ReferenceStatus.DOWNLOADED
+        and s.times_cited > 0
+        and s.supporting_citations == 0
+        and s.partial_citations == 0
+        and s.not_audited_positions == []
     )
 
     uncited_claims = _uncited_claims(chunks)
@@ -290,6 +346,7 @@ def aggregate_report(
         uncited_claims=uncited_claims,
         count_uncited_claims=len(uncited_claims),
         count_claim_chunks=claim_chunks,
+        citation_issues=_citation_issues(chunks, references, results),
         total_cost_usd=cost.total_cost_usd,
         total_tokens=cost.total_tokens,
         cost_tracked=cost_tracked,

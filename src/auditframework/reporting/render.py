@@ -100,6 +100,7 @@ class ReportRenderer:
             self._render_metadata(),
             self._render_distribution(),
             self._render_verification(),
+            self._render_citation_issues(),
             self._render_cost(),
             self._render_reference_ranking(),
             self._render_content_verification(),
@@ -247,7 +248,39 @@ class ReportRenderer:
             )
             lines.append("")
             lines.append(f"Reclassificações por etapa: {by_stage}.")
+        if report.citation_issues:
+            lines.append("")
+            lines.append(
+                "Os prováveis erros de citação estão detalhados na seção seguinte."
+            )
         return ReportSection("Verificação de UNSUPPORTED", "\n".join(lines))
+
+    def _render_citation_issues(self) -> ReportSection | None:
+        """Detalhe da Etapa C: chunks que a fonte citada não sustenta, mas
+        cuja afirmação aparece (ou é contradita) em outra referência
+        baixada."""
+        issues = self.report.citation_issues
+        if not issues:
+            return None
+        lines = [
+            "Trechos com veredito **UNSUPPORTED** — a **fonte citada não os sustenta** — mas "
+            "cuja afirmação **foi encontrada em outra referência já baixada** durante a "
+            "checagem no corpus inteiro (Etapa C). A Etapa C **nunca** reclassifica para "
+            "SUPPORTED (a auditoria é sobre a fonte citada), então o veredito continua "
+            "UNSUPPORTED; o cenário mais provável, porém, é **citação trocada** — o fato é "
+            "real, a fonte apontada é que está errada. `⚠` marca quando outra fonte "
+            "**contradiz** o trecho.",
+            "",
+            "| Trecho | Cita | Corroborado por | Contradito por |",
+            "|---|---|---|---|",
+        ]
+        for issue in issues:
+            claim = f"`#{issue.position}` {_excerpt(issue.claim_excerpt, 120)}".replace("|", "\\|")
+            contra = f"{issue.contradicting_markers} ⚠" if issue.contradicting_markers else "—"
+            lines.append(
+                f"| {claim} | {issue.cited_markers} | {issue.corroborating_markers or '—'} | {contra} |"
+            )
+        return ReportSection("Prováveis Erros de Citação", "\n".join(lines))
 
     def _render_cost(self) -> ReportSection:
         report = self.report
@@ -290,27 +323,29 @@ class ReportRenderer:
             )
         summary += "\n"
         summary += (
-            "> **Citada** = quantos trechos citam a fonte. **Sustenta / Parcial / Não sustenta** "
-            "abrem esse total pela relação da própria fonte com a afirmação (somam **Citada**). "
-            "*Não sustenta †* = a fonte não trata a afirmação, a contradiz, ou o juiz não "
-            "detalhou aquela fonte.\n\n"
+            "> **Citada** = quantos trechos citam a fonte. As colunas seguintes abrem esse "
+            "total e **somam Citada**: **Sustenta / Parcial** (a fonte sustenta a afirmação "
+            "inteira / em parte); **Não sustenta †** (a fonte foi verificada e não trata a "
+            "afirmação, a contradiz, ou o juiz não a detalhou); **Não auditada** (o trecho "
+            "que a cita foi pulado, ou a fonte não pôde ser baixada — não houve verificação).\n\n"
         )
         header = (
-            "| Referência | Status | Citada | Sustenta | Parcial | Não sustenta † |\n"
-            "|---|---|---|---|---|---|\n"
+            "| Referência | Status | Citada | Sustenta | Parcial | Não sustenta † | Não auditada |\n"
+            "|---|---|---|---|---|---|---|\n"
         )
         rows_out: list[str] = []
         for s in stats:
             label = f"[{self._reference_label(s.reference_id, s.url)}]({s.url})"
             if s.times_cited == 0:
-                rows_out.append(f"| {label} | {s.status.value} | 0 · nunca citada | — | — | — |")
+                rows_out.append(f"| {label} | {s.status.value} | 0 · nunca citada | — | — | — | — |")
                 continue
             unsupportive = (
                 len(s.absent_positions) + len(s.contradicts_positions) + len(s.unrated_positions)
             )
             rows_out.append(
                 f"| {label} | {s.status.value} | {s.times_cited} | "
-                f"{len(s.supports_positions)} | {len(s.partial_positions)} | {unsupportive} |"
+                f"{len(s.supports_positions)} | {len(s.partial_positions)} | {unsupportive} | "
+                f"{len(s.not_audited_positions)} |"
             )
         return ReportSection("Análise por Referência", summary + header + "\n".join(rows_out))
 
@@ -325,13 +360,14 @@ class ReportRenderer:
         lines = [
             "Uma linha por **referência citada**: quais trechos do documento (`#N` = posição "
             "no texto) ela sustenta, sustenta só em parte, ou não sustenta. `⚡` = a fonte "
-            "**contradiz** o trecho; `s/ aval.` = o juiz não avaliou aquela fonte no trecho. "
-            "O `#N` antes do trecho da fonte indica de qual trecho da resposta ele é evidência.",
+            "**contradiz** o trecho; `s/ aval.` = o juiz não avaliou aquela fonte no trecho; "
+            "`pulado` = o trecho não foi auditado. O `#N` antes do trecho da fonte indica de "
+            "qual trecho da resposta ele é evidência.",
             "",
             "| Referência | Sustenta | Parcial | Não sustenta | Trecho representativo da fonte |",
             "|---|---|---|---|---|",
         ]
-        for s in cited:
+        for s in rated:
             label = f"[{self._reference_label(s.reference_id, s.url)}]({s.url})"
             sustenta = _compress_positions(s.supports_positions) or "—"
             parcial = _compress_positions(s.partial_positions) or "—"
@@ -342,6 +378,8 @@ class ReportRenderer:
                 nao_parts.append(_compress_positions(s.contradicts_positions) + " ⚡")
             if s.unrated_positions:
                 nao_parts.append(_compress_positions(s.unrated_positions) + " (s/ aval.)")
+            if s.not_audited_positions:
+                nao_parts.append(_compress_positions(s.not_audited_positions) + " (pulado)")
             nao = ", ".join(nao_parts) or "—"
             if s.key_excerpt:
                 excerpt = _excerpt(s.key_excerpt, 160).replace("|", "\\|")
@@ -486,15 +524,23 @@ class ReportRenderer:
             lines.append(f"  - Verificação: {verification}")
         return "\n".join(lines)
 
-    @staticmethod
-    def _verification_note(result: AuditResult) -> str:
+    def _verification_note(self, result: AuditResult) -> str:
         if not result.verification_trail:
             return ""
         path = " → ".join(step.stage for step in result.verification_trail)
         if result.verdict == AuditVerdict.UNSUPPORTED:
             note = "UNSUPPORTED confirmado" if result.unsupported_confirmed else "UNSUPPORTED (não confirmado)"
             if result.corroborated_by_other_reference:
-                note += f"; corroborado por outra referência ({', '.join(result.corroborated_by_other_reference)})"
+                note += (
+                    "; afirmação corroborada por outra fonte não citada: "
+                    f"{self._markers_for(result.corroborated_by_other_reference)} "
+                    "(provável citação trocada)"
+                )
+            if result.contradicted_by_other_reference:
+                note += (
+                    "; afirmação contradita por outra fonte: "
+                    f"{self._markers_for(result.contradicted_by_other_reference)}"
+                )
         else:
             baseline = next(
                 (s.note for s in result.verification_trail if s.stage == "baseline"), ""

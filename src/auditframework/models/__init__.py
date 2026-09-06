@@ -10,6 +10,7 @@ from .curated import CuratedDocument, RetrievedPassage
 from .document import Document
 from .reference import Reference, ReferenceStatus
 from .report import (
+    CitationIssue,
     JudgeConfig,
     PotentiallyUnsourcedChunk,
     Report,
@@ -36,6 +37,7 @@ __all__ = [
     "JudgeConfig",
     "PotentiallyUnsourcedChunk",
     "UncitedClaimChunk",
+    "CitationIssue",
     "ReferenceStats",
     "SourceInfo",
     "ToolStats",

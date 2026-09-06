@@ -223,35 +223,45 @@ aplicam:
 3. **Verificação de UNSUPPORTED** — quantos `UNSUPPORTED` iniciais foram
    **confirmados**, quantos foram **reclassificados** (por etapa) e quantos são
    **provável erro de citação** (corroborados por outra referência).
-4. **Custo e Tokens** — total e médias por requisição. Quando o provider não tem
+4. **Prováveis Erros de Citação** (só quando houver) — o detalhe da linha
+   acima: cada trecho `UNSUPPORTED` cuja afirmação a Etapa C encontrou **em
+   outra referência baixada**, com o `#N` do trecho, o que ele **cita** e as
+   referências que o **corroboram** / **contradizem** (marcadores `[N]`
+   legíveis). O veredito continua UNSUPPORTED; o mais provável é citação
+   trocada.
+5. **Custo e Tokens** — total e médias por requisição. Quando o provider não tem
    tabela de preços (ex: `openai`), a seção avisa que o custo é um piso, não o
    valor real (só `anthropic` com modelo tabelado e execução local são
    contabilizados).
-5. **Análise por Referência** — uma linha por referência: status e o total de
-   citações aberto em **Sustenta / Parcial / Não sustenta** (relação da própria
-   fonte com a afirmação — os três somam o total). Sinaliza referências citadas
-   que nunca sustentaram (nem parcialmente) nada e referências listadas mas
-   nunca citadas.
-6. **Tabela de Verificação por Fonte** — a mesma lista, mas por conteúdo: uma
-   linha por **referência citada**, com as **posições dos trechos** (`#N`) que
-   ela sustenta / sustenta em parte / não sustenta (`⚡` = contradiz), e um
-   trecho literal representativo da fonte prefixado pelo `#N` do trecho da
-   resposta para o qual serve de evidência. É a "tabela de verificação de
-   conteúdo" de uma auditoria manual, sem repetir a mesma referência.
-7. **Referências Mortas e Inacessíveis** — HTTP 404 e 403/timeout/SSL após
+6. **Análise por Referência** — uma linha por referência: status e o total de
+   citações (**Citada**) aberto em **Sustenta / Parcial / Não sustenta /
+   Não auditada** — os quatro somam **Citada**. *Não auditada* = o trecho que
+   cita a fonte foi pulado, ou a fonte não pôde ser baixada (nunca houve
+   verificação contra ela). Sinaliza referências citadas que nunca sustentaram
+   nada e referências listadas mas nunca citadas.
+7. **Tabela de Verificação por Fonte** — a mesma lista, mas por conteúdo: uma
+   linha por **referência citada** (só as que foram efetivamente verificadas),
+   com as **posições dos trechos** (`#N`) que ela sustenta / sustenta em parte /
+   não sustenta (`⚡` = contradiz, `s/ aval.` = juiz não detalhou, `pulado` =
+   não auditado), e um trecho literal representativo da fonte prefixado pelo
+   `#N` do trecho da resposta para o qual serve de evidência. É a "tabela de
+   verificação de conteúdo" de uma auditoria manual, sem repetir a mesma
+   referência.
+8. **Referências Mortas e Inacessíveis** — HTTP 404 e 403/timeout/SSL após
    esgotar as estratégias de fetch (`curl_cffi` com fingerprint de navegador →
    cloudscraper → playwright), com teto de tempo por referência e uma 2ª
    tentativa só para falhas possivelmente transitórias.
-8. **Exemplos por Veredito** — até 3 por veredito, com trecho, justificativa,
+9. **Exemplos por Veredito** — até 3 por veredito, com trecho, justificativa,
    evidência literal, aspectos não cobertos, uma tabela por fonte citada e — se
-   reclassificado — o que o baseline dizia + trilha da cascata.
-9. **Afirmações sem Citação** — parágrafos que fazem afirmação factual e não
-   têm marcador `[N]` nenhum. O `AnswerChunker` ancora a citação no parágrafo
-   em que ela aparece; parágrafos anteriores sem marcador próprio caem aqui e
-   **não** são julgados contra a citação do vizinho.
-10. **Chunks Citados com Várias Afirmações** — heurística complementar: chunk
+   reclassificado ou corroborado por outra fonte — o que o baseline dizia +
+   trilha da cascata + marcadores `[N]` corroborantes.
+10. **Afirmações sem Citação** — parágrafos que fazem afirmação factual e não
+    têm marcador `[N]` nenhum. O `AnswerChunker` ancora a citação no parágrafo
+    em que ela aparece; parágrafos anteriores sem marcador próprio caem aqui e
+    **não** são julgados contra a citação do vizinho.
+11. **Chunks Citados com Várias Afirmações** — heurística complementar: chunk
     citado com ≥3 frases em que só a última está adjacente à citação.
-11. **Chunks Não Auditados** — chunks pulados, agrupados por motivo (não citam
+12. **Chunks Não Auditados** — chunks pulados, agrupados por motivo (não citam
     nada / citam referência não baixada).
 
 ## Estrutura
