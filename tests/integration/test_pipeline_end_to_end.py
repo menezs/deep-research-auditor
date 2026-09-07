@@ -210,6 +210,11 @@ def test_pipeline_runs_all_stages_and_produces_a_coherent_report(tmp_path, fetch
     assert "[[1]]" in report_md or "[1]" in report_md
     assert "SUPPORTED" in report_md and "CONTRADICTED" in report_md
 
+    chunk_table = (run_dir / "tabela_chunks_veredito.md").read_text(encoding="utf-8")
+    table_rows = [ln for ln in chunk_table.splitlines() if ln.startswith("| **#")]
+    assert len(table_rows) == len(json.loads((run_dir / "answer_chunks.json").read_text(encoding="utf-8")))
+    assert "| Chunk | Veredito | Citações | Links das citações |" in chunk_table
+
 
 def test_resume_only_judges_chunks_without_a_persisted_result(tmp_path, fetcher, embedder, llm_client):
     answer_path = tmp_path / "answer.md"

@@ -44,7 +44,7 @@ from .models import (
     SourceInfo,
 )
 from .reporting.aggregator import aggregate_report
-from .reporting.render import render_json, render_markdown
+from .reporting.render import render_chunk_table_markdown, render_json, render_markdown
 
 logger = get_logger(__name__)
 
@@ -442,6 +442,9 @@ class ReportingStage:
             render_markdown(report, chunks=chunks, references=references, results=results), encoding="utf-8"
         )
         (ctx.run_dir / "report.json").write_text(render_json(report), encoding="utf-8")
+        (ctx.run_dir / "tabela_chunks_veredito.md").write_text(
+            render_chunk_table_markdown(chunks, references, results, skipped), encoding="utf-8"
+        )
         logger.info("Relatorio gerado em %s", ctx.run_dir / "report.md")
 
 

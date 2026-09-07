@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
-from ..models import AnswerChunk, AuditResult, AuditVerdict, Reference, Report, ToolStats
+from ..models import AnswerChunk, AuditResult, AuditVerdict, Reference, Report, SkippedChunk, ToolStats
 
 
 @dataclass
@@ -563,6 +564,60 @@ def render_markdown(
 
 def render_json(report: Report) -> str:
     return ReportRenderer(report).to_json()
+
+
+_CHUNK_TABLE_EXCERPT_LEN = 400
+
+
+def _marker_sort_key(marker: str) -> tuple[int, str]:
+    digits = re.sub(r"\D", "", marker)
+    return (int(digits) if digits else 10**9, marker)
+
+
+def render_chunk_table_markdown(
+    chunks: list[AnswerChunk],
+    references: list[Reference],
+    results: list[AuditResult],
+    skipped: list[SkippedChunk] | None = None,
+) -> str:
+    """Uma única tabela Markdown com **todos** os chunks da resposta, na
+    ordem em que aparecem: texto do trecho, veredito
+    (`SUPPORTED`/`UNSUPPORTED`/`CONTRADICTED`, ou `PULADO — <motivo>` para
+    chunks não julgados), os marcadores de citação do trecho (`[1][2]...`)
+    e o link de cada marcador (`[1] - https://...`). Gerada ao final de
+    toda run em `tabela_chunks_veredito.md`, ao lado de `report.md`."""
+    results_by_id = {r.answer_chunk_id: r for r in results}
+    skip_by_id = {s.answer_chunk_id: s for s in (skipped or [])}
+    ref_by_id = {ref.id: ref for ref in references}
+
+    def _marker_of(ref: Reference) -> str:
+        return ref.citation_markers[0] if ref.citation_markers else f"[{ref.id}]"
+
+    lines = [
+        "| Chunk | Veredito | Citações | Links das citações |",
+        "|---|---|---|---|",
+    ]
+    for chunk in sorted(chunks, key=lambda c: c.position):
+        result = results_by_id.get(chunk.id)
+        if result is not None:
+            verdict = _VERDICT_LABELS.get(result.verdict, result.verdict.value)
+        elif chunk.id in skip_by_id:
+            verdict = f"PULADO — {_excerpt(skip_by_id[chunk.id].reason, 160)}"
+        else:
+            verdict = "—"
+
+        cited_refs = [ref_by_id[rid] for rid in chunk.cited_reference_ids if rid in ref_by_id]
+        link_by_marker: dict[str, str] = {}
+        for ref in cited_refs:
+            link_by_marker.setdefault(_marker_of(ref), ref.normalized_url or ref.raw_url)
+        markers = sorted(link_by_marker, key=_marker_sort_key)
+
+        citations = "".join(markers) if markers else "—"
+        links = "<br>".join(f"{m} - {link_by_marker[m]}" for m in markers) if markers else "—"
+        text = _excerpt(chunk.text, _CHUNK_TABLE_EXCERPT_LEN).replace("|", "\\|")
+        lines.append(f"| **#{chunk.position}** — {text} | {verdict} | {citations} | {links} |")
+
+    return "\n".join(lines) + "\n"
 
 
 def render_tool_comparison_markdown(tool_stats: list[ToolStats]) -> str:

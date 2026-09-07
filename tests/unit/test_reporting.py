@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -19,6 +20,7 @@ from auditframework.reporting import (
     aggregate_report,
     aggregate_tool_stats,
     build_reference_stats,
+    render_chunk_table_markdown,
     render_json,
     render_markdown,
     render_tool_comparison_markdown,
@@ -719,3 +721,57 @@ class TestCitationLevelAndUnsourced:
         assert report.skipped_reason_counts == {"sem_citacao": 1, "ref_sem_conteudo": 1}
         markdown = render_markdown(report)
         assert "Motivos:" in markdown and "não citam nenhuma referência" in markdown
+
+
+class TestChunkTableMarkdown:
+    def _refs(self):
+        return [
+            _reference("r1", citation_markers=["[1]"], normalized_url="https://a.example/1"),
+            _reference("r2", citation_markers=["[2]"], normalized_url="https://b.example/2"),
+            _reference("r3", citation_markers=["[3]"], normalized_url="https://c.example/3"),
+        ]
+
+    def _chunks(self):
+        return [
+            AnswerChunk(id="c0", answer_id="a1", position=0, text="Primeiro trecho.", cited_reference_ids=["r2", "r1"]),
+            AnswerChunk(id="c1", answer_id="a1", position=1, text="Trecho sem citação.", cited_reference_ids=[]),
+            AnswerChunk(id="c2", answer_id="a1", position=2, text="Terceiro trecho.", cited_reference_ids=["r3"]),
+        ]
+
+    def test_single_table_has_one_row_per_chunk_in_order(self):
+        chunks = self._chunks()
+        results = [_result("c0", AuditVerdict.SUPPORTED), _result("c2", AuditVerdict.UNSUPPORTED)]
+        skipped = [SkippedChunk(answer_chunk_id="c1", reason="Chunk nao cita nenhuma referencia.")]
+
+        md = render_chunk_table_markdown(chunks, self._refs(), results, skipped)
+        lines = md.strip().splitlines()
+
+        assert lines[0] == "| Chunk | Veredito | Citações | Links das citações |"
+        assert lines[1] == "|---|---|---|---|"
+        assert len(lines) == 2 + len(chunks)
+        assert lines.index("| **#0** — Primeiro trecho. | SUPPORTED | [1][2] | [1] - https://a.example/1<br>[2] - https://b.example/2 |") == 2
+        assert "| **#2** — Terceiro trecho. | UNSUPPORTED | [3] | [3] - https://c.example/3 |" in md
+
+    def test_markers_are_sorted_numerically_not_by_citation_order(self):
+        chunks = [AnswerChunk(id="c0", answer_id="a1", position=0, text="t", cited_reference_ids=["r3", "r1"])]
+        md = render_chunk_table_markdown(chunks, self._refs(), [_result("c0", AuditVerdict.SUPPORTED)])
+        assert "| [1][3] | [1] - https://a.example/1<br>[3] - https://c.example/3 |" in md
+
+    def test_skipped_chunk_shows_reason_and_no_citations(self):
+        chunks = [AnswerChunk(id="c0", answer_id="a1", position=0, text="t", cited_reference_ids=["r1"])]
+        skipped = [SkippedChunk(answer_chunk_id="c0", reason="Referencia citada nao baixada.")]
+        md = render_chunk_table_markdown(chunks, self._refs(), [], skipped)
+        assert "| PULADO — Referencia citada nao baixada. | [1] | [1] - https://a.example/1 |" in md
+
+    def test_chunk_without_verdict_or_skip_is_marked_with_dash(self):
+        chunks = [AnswerChunk(id="c0", answer_id="a1", position=0, text="t", cited_reference_ids=[])]
+        md = render_chunk_table_markdown(chunks, self._refs(), [])
+        assert "| **#0** — t | — | — | — |" in md
+
+    def test_pipes_and_newlines_in_chunk_text_do_not_break_the_table(self):
+        chunks = [AnswerChunk(id="c0", answer_id="a1", position=0, text="a | b\nc", cited_reference_ids=[])]
+        md = render_chunk_table_markdown(chunks, self._refs(), [])
+        row = md.strip().splitlines()[-1]
+        # pipe is escaped and the newline is collapsed, so the cell boundaries stay intact
+        assert "a \\| b c" in row
+        assert len(re.findall(r"(?<!\\)\|", row)) == 5  # 4 columns -> 5 unescaped delimiters

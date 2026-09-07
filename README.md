@@ -264,6 +264,12 @@ aplicam:
 12. **Chunks Não Auditados** — chunks pulados, agrupados por motivo (não citam
     nada / citam referência não baixada).
 
+Além do relatório, cada run grava `data/runs/<run_id>/tabela_chunks_veredito.md`:
+uma única tabela Markdown com **todos** os chunks na ordem da resposta —
+texto do trecho, veredito (`SUPPORTED`/`UNSUPPORTED`/`CONTRADICTED`, ou
+`PULADO — <motivo>` para os não julgados), os marcadores de citação do trecho
+(`[1][2]…`) e o link de cada marcador (`[1] - https://…`).
+
 ## Estrutura
 
 ```
