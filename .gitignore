@@ -179,9 +179,13 @@ pyrightconfig.json
 data/runs/
 model_cache/
 answers/*/*
+answers/*.csv
+answers/*.xlsx
 answers/*md
 answers/*pdf
 answers/*docx
 answers/*doc
 answers/*json
 .env
+scripts/
+estudo-fontes-nao-citadas/

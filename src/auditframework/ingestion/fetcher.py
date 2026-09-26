@@ -125,6 +125,19 @@ class _Http403Error(Exception):
     """Sinal de controle interno: 403 recebido, tentar proximo fallback."""
 
 
+# O WAF da NCBI (pubmed.ncbi.nlm.nih.gov, pmc.ncbi.nlm.nih.gov) responde com
+# HTTP 203 — nao 403 — a um desafio "proof-of-work" em JS que seta um
+# cookie, faz POST para /_pow/solve e recarrega a pagina. Como o status vem
+# < 400, `_get`/`_fetch_with_cloudscraper` tratavam essa pagina de desafio
+# (14 palavras: "Cookies must be enabled...") como conteudo valido. Nem
+# curl_cffi nem cloudscraper executam JS, entao so o playwright resolve.
+_COOKIE_CHALLENGE_MARKERS = (b'id="cookie-required"', b"/_pow/solve")
+
+
+def _looks_like_cookie_challenge(content: bytes) -> bool:
+    return len(content) < 8192 and all(marker in content for marker in _COOKIE_CHALLENGE_MARKERS)
+
+
 @dataclass
 class FetchResult:
     content: bytes
@@ -290,6 +303,9 @@ class HttpFetcher:
             time.sleep(self.backoff * (2**attempt))
             return self._get(url, verify=verify, attempt=attempt + 1)
 
+        if _looks_like_cookie_challenge(response.content):
+            raise _Http403Error(url)
+
         return FetchResult(
             content=response.content,
             content_type=response.headers.get("Content-Type", ""),
@@ -308,7 +324,7 @@ class HttpFetcher:
         scraper = cloudscraper.create_scraper()
         response = scraper.get(url, headers=_HEADERS, timeout=self.timeout)
 
-        if response.status_code == 403:
+        if response.status_code == 403 or _looks_like_cookie_challenge(response.content):
             if _is_pdf_url(url):
                 # Playwright nao extrai texto de um PDF (abre o visualizador
                 # nativo do Chromium) — tentar so adiaria essa mesma falha
