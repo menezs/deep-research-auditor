@@ -315,10 +315,10 @@ class ReportRenderer:
         total = len(stats)
         uncited = sum(1 for s in stats if s.times_cited == 0)
         pct_uncited = (uncited / total) * 100.0
-        summary = f"Referências sem nenhuma citação: {uncited}/{total} ({pct_uncited:.1f}%)\n"
+        summary = f"- Referências sem nenhuma citação: {uncited}/{total} ({pct_uncited:.1f}%)\n"
         if report.uncredited_reference_count:
             summary += (
-                f"Referências citadas mas que nunca sustentaram (nem parcialmente) nenhuma afirmação: "
+                f"- Referências citadas mas que nunca sustentaram (nem parcialmente) nenhuma afirmação: "
                 f"{report.uncredited_reference_count}.\n"
             )
         summary += "\n"

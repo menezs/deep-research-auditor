@@ -47,6 +47,36 @@ def _strip_tag_artifacts(text: str) -> str:
     return _TAG_ARTIFACT_RE.sub("", text).strip()
 
 
+_NO_SPACE_BEFORE = ".,;:!?)]}%…"
+
+
+def _join_tail(claim: str, tail: str) -> str:
+    """Costura a cauda da frase no trecho, fechando o vao que o marcador
+    deixou: sem isso sobra espaco duplo ("when  vaccination") ou espaco antes
+    da pontuacao ("...da lista .")."""
+    tail = tail.lstrip()
+    if not tail:
+        return claim
+    separator = "" if tail[0] in _NO_SPACE_BEFORE else " "
+    return claim.rstrip() + separator + tail
+
+
+def _clean_body(raw_text: str) -> str:
+    """Texto do trecho como ele vai para o chunk, ou `""` quando nao sobra
+    conteudo. As tags saem ANTES do teste de conteudo: `<u>` tem uma letra
+    dentro, e testar o texto cru faria `"> <u>"` (marcador no inicio de uma
+    entrada de lista) passar por afirmacao."""
+    body = _LEADING_NOISE_RE.sub("", _strip_tag_artifacts(raw_text)).strip()
+    return body if _HAS_ALNUM_RE.search(body) else ""
+
+
+def _ends_sentence(text: str) -> bool:
+    """A frase ja terminou no fim de `text`. As tags saem antes da checagem:
+    o conversor as deixa ENTRE o ponto e o marcador (`...em 2025.<sup><u>`),
+    e sem remove-las o `.` ficaria invisivel."""
+    return _strip_tag_artifacts(text).rstrip().endswith((".", "!", "?", "…", ":", ";"))
+
+
 def _split_paragraphs(text: str) -> list[str]:
     """Paragrafos separados por linha em branco; um cabecalho markdown no
     meio de um bloco tambem inicia um novo paragrafo."""
@@ -183,8 +213,8 @@ class AnswerChunker:
         chunks: list[AnswerChunk] = []
 
         def emit(raw_text: str, markers: list[str], ref_ids: list[str]) -> None:
-            body = _LEADING_NOISE_RE.sub("", _strip_tag_artifacts(raw_text)).strip()
-            if not body or not _HAS_ALNUM_RE.search(body):
+            body = _clean_body(raw_text)
+            if not body:
                 return
             pos = len(chunks)
             chunks.append(
@@ -206,7 +236,7 @@ class AnswerChunker:
                 continue
             boundaries = sentence_boundaries(block)
             previous_end = 0
-            for markers, run_start, run_end in runs:
+            for index, (markers, run_start, run_end) in enumerate(runs):
                 # Uma fronteira so corta se sobra texto entre ela e o
                 # marcador: em "frase.[4]" o ponto encosta no marcador, e o
                 # `[4]` ancora a frase que acabou de terminar — nao um
@@ -215,8 +245,45 @@ class AnswerChunker:
                     b for b in boundaries if previous_end <= b <= run_start and block[b:run_start].strip()
                 ]
                 left = max(candidates) if candidates else previous_end
-                emit(block[left:run_start], markers, _resolve_markers(markers, marker_to_ref_id))
-                previous_end = run_end
+                claim = block[left:run_start]
+
+                # O marcador tambem sustenta o RESTO da frase dele. Sem isso,
+                # uma citacao no meio da frase ("...protection when [1]
+                # vaccination occurs before age 17.") ficava com o pedaco
+                # anterior a ela e o resto — em geral a parte que qualifica o
+                # dado — era descartado por nao ter marcador proprio.
+                sentence_end = min((b for b in boundaries if b > run_start), default=len(block))
+                has_next_run = index + 1 < len(runs)
+                next_run_start = runs[index + 1][1] if has_next_run else len(block)
+                takes_tail = (
+                    bool(_clean_body(claim))
+                    and not _ends_sentence(claim)
+                    and (not has_next_run or sentence_end < next_run_start)
+                )
+                if takes_tail:
+                    # Tres condicoes, cada uma por um caso real:
+                    #
+                    # claim com conteudo: um marcador sem NADA antes dele esta
+                    # no inicio da linha, que e a assinatura de uma entrada de
+                    # lista de fontes (`[1] World Journal of Oncology.`), nao
+                    # de uma citacao no meio da frase. Esses trechos sempre
+                    # foram descartados; a cauda nao pode ressuscita-los.
+                    #
+                    # `sentence_end < next_run_start`: ninguem mais reivindica
+                    # esse texto. Se outro marcador vem antes do fim da frase,
+                    # a cauda e dele, pela mesma regra de walk-back — e a
+                    # comparacao e ESTRITA por causa de "...quando [1] a frase
+                    # termina.[2]", em que o `[2]` fica exatamente na fronteira:
+                    # levar a cauda ali deixaria o `[2]` sem trecho nenhum e
+                    # apagaria uma citacao da auditoria.
+                    #
+                    # `not _ends_sentence(claim)`: em "frase.[4] Outra frase."
+                    # o marcador esta colado numa frase COMPLETA, e o que vem
+                    # depois e uma frase nova — nao a cauda desta.
+                    claim = _join_tail(claim, block[run_end:sentence_end])
+
+                emit(claim, markers, _resolve_markers(markers, marker_to_ref_id))
+                previous_end = sentence_end if takes_tail else run_end
 
         return chunks
 

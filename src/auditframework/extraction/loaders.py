@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Protocol
 
 from ..common.errors import ExtractionError
+from .pdf_marker_order import misplaced_marker_runs, repair_marker_order
 from .reflow import reflow_markdown
 
 _HEADING_STYLE_RE = re.compile(r"^heading\s*(\d)$", re.IGNORECASE)
@@ -89,7 +90,11 @@ class PdfAnswerLoader:
     def load(self, path: Path) -> str:
         import pymupdf4llm
 
-        return reflow_markdown(pymupdf4llm.to_markdown(str(path)))
+        markdown = pymupdf4llm.to_markdown(str(path))
+        # Antes do reflow: o reparo casa o Markdown com a geometria da pagina,
+        # e o reflow junta linhas, o que embaralharia essa correspondencia.
+        markdown = repair_marker_order(markdown, misplaced_marker_runs(path))
+        return reflow_markdown(markdown)
 
 
 class DocxAnswerLoader:

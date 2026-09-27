@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from auditframework.extraction.reference_extractor import (
+    body_section_start,
     extract_references,
     find_reference_section,
 )
@@ -590,6 +591,94 @@ class TestReferenceSectionBacktrack:
         )
         anchor = find_reference_section(text)
         assert text[anchor[0]] == "⁂"
+
+
+class TestBodySectionStart:
+    """O corte do corpo auditável é anterior à âncora de leitura da lista.
+    Cada caso aqui é uma forma de lista de fontes vista no corpus real que a
+    âncora de leitura não alcançava, deixando as entradas virarem afirmações."""
+
+    ASTERISM_LIST = "\n⁂\n\n1. <u>https://example.com/a</u>\n2. <u>https://example.com/b</u>\n3. <u>https://example.com/c</u>\n"
+
+    def _cut(self, text: str) -> str:
+        start = body_section_start(text)
+        return text if start is None else text[:start].rstrip()
+
+    def test_entry_whose_url_fell_to_the_next_line_does_not_block_the_cut(self):
+        """Perplexity em PDF: o conversor empurra a URL da entrada para o
+        parágrafo seguinte, e a linha do título fica sem URL. Era o que
+        bloqueava o corte — 14 de 22 chunks eram entradas da lista."""
+        text = (
+            "Corpo da resposta [1].\n\n"
+            "## References\n\n"
+            "HPV Vaccination and the Risk of Invasive Cervical Cancer – NEJM <u>[2]</u>\n\n"
+            "<u>https://example.com/nejm</u>\n"
+        ) + self.ASTERISM_LIST
+        assert self._cut(text) == "Corpo da resposta [1]."
+
+    def test_entries_without_any_url_do_not_block_the_cut(self):
+        """Perplexity em PDF: a lista principal traz fonte e marcador, e a
+        URL só existe na lista do `⁂`."""
+        text = (
+            "Corpo [1].\n\n"
+            "## **Referências**\n\n"
+            "1. **Ministério da Saúde** - Relatório Nacional sobre a Demência<sup><u>[24][4]</u></sup>\n\n"
+            "2. **Anvisa** - Aprovação do donanemabe<sup><u>[1]</u></sup>\n"
+        ) + self.ASTERISM_LIST
+        assert self._cut(text) == "Corpo [1]."
+
+    def test_reference_list_rendered_as_a_markdown_table_does_not_block_the_cut(self):
+        text = (
+            "Corpo [1].\n\n"
+            "## **Referências Completas**\n\n"
+            "|#|Fonte|Link|Conteúdo Citado|\n|---|---|---|---|\n"
+            "|1|SciELO|https://example.com/scielo|Fatores de risco|\n"
+        ) + self.ASTERISM_LIST
+        assert self._cut(text) == "Corpo [1]."
+
+    def test_heading_that_lost_its_markup_in_the_docx_conversion_is_still_a_heading(self):
+        """`.docx` perde o estilo do parágrafo: `Referências Completas` chega
+        como linha comum, sem `#` nem negrito."""
+        text = (
+            "Corpo [1].\n\n"
+            "Referências Completas\n\n"
+            "1 SciELO - Hallazgos clínicos https://example.com/scielo Fatores de risco\n"
+            "2 FAPESP - Estudo revela proteína https://example.com/fapesp Periostina\n"
+        ) + self.ASTERISM_LIST
+        assert self._cut(text) == "Corpo [1]."
+
+    def test_body_section_titled_like_a_source_list_does_not_cut_the_answer(self):
+        """Contraprova do caso acima, e a razão de a densidade existir: um
+        título de seção do CORPO sem marcação ("Fontes oficiais") tem a mesma
+        forma. Cortar ali descartava 239 afirmações de um arquivo real."""
+        text = (
+            "Fontes oficiais\n\n"
+            + "".join(f"Parágrafo {i} de análise, sem link nenhum. [{i}]\n\n" for i in range(1, 15))
+            + "## Referências\n\n[1] Titulo\nhttps://example.com/a\n"
+        )
+        assert self._cut(text).startswith("Fontes oficiais")
+        assert "Parágrafo 14" in self._cut(text)
+
+    def test_a_sparse_real_list_under_a_marked_heading_is_not_rejected(self):
+        """A densidade NÃO se aplica a cabeçalho marcado: listas reais
+        pequenas ou de entrada multilinha ficam abaixo do limite (medido:
+        0.32 num `.md` do Grok, 2 URLs num fixture)."""
+        text = "Corpo [1].\n\n## Referências\n\n[1] Marco Civil da Internet\nhttps://example.com/a\n"
+        assert self._cut(text) == "Corpo [1]."
+
+    def test_text_without_any_source_list_is_returned_whole(self):
+        assert body_section_start("Um parágrafo qualquer. [1]") is None
+
+    def test_cut_never_lands_after_the_reading_anchor(self):
+        """Invariante que mantém corpo e lista complementares: o que este
+        corte tira a mais é sempre região de lista."""
+        text = (
+            "Corpo [1].\n\n## References\n\nTitulo – PMC <u>[1]</u>\n\n"
+            "<u>https://example.com/a</u>\n"
+        ) + self.ASTERISM_LIST
+        start, anchor = body_section_start(text), find_reference_section(text)
+        assert start is not None and anchor is not None
+        assert start <= anchor[0]
 
 
 class TestPrefixTruncatedUrlRepair:

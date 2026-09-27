@@ -56,13 +56,53 @@ def _clean_url(url: str) -> str:
 
 
 _REFERENCE_SECTION_HEADING = re.compile(
-    r"^#{1,6}\s*\**\s*(refer[eê]ncias|references|fontes|sources|bibliografia)\b",
+    r"^(?:#{1,6}[ \t]*\**[ \t]*|\*\*[ \t]*)(refer[eê]ncias|references|fontes|sources|bibliografia)\b",
     re.IGNORECASE | re.MULTILINE,
 )
 """Cabecalho de secao de lista de fontes. Tolera negrito markdown ao redor
 da palavra-chave e texto extra depois dela (ex: "### **Referencias
-citadas**" do Gemini em PDF) — nao exige mais que a linha seja *so* a
-palavra-chave, so que comece com ela."""
+citadas**" do Gemini em PDF) — nao exige que a linha seja *so* a
+palavra-chave, so que comece com ela.
+
+Aceita tambem o cabecalho marcado APENAS por negrito, sem `#` (`**References**`,
+do Grok; `**Fontes**`, do ChatGPT). Sem isso a lista de fontes nao era
+reconhecida e ficava dentro do corpo, com cada entrada disputando espaco com
+as afirmacoes. Exigir `#` OU `**` no inicio da linha e o que separa um
+cabecalho de uma frase que por acaso comece com "References"."""
+
+_BARE_REFERENCE_HEADING = re.compile(
+    r"^[ \t]*(refer[eê]ncias|references|fontes|sources|bibliografia)\b[^.!?\n]{0,40}$",
+    re.IGNORECASE | re.MULTILINE,
+)
+"""Cabecalho de lista de fontes que chegou SEM marcacao nenhuma — nem `#`,
+nem negrito. Acontece na conversao de `.docx`, que perde o estilo do
+paragrafo e entrega `Referências Completas` como linha comum.
+
+Sozinho este padrao e perigoso: ele casa tambem um titulo de secao do CORPO
+da resposta ("Fontes oficiais", "Referências completas" no eco do prompt), e
+cortar ali descartaria a resposta inteira — 239 afirmacoes num arquivo real.
+Por isso todo candidato daqui passa por `_dominated_by_urls`; os com `#` ou
+`**` nao precisam, porque a marcacao ja e a evidencia."""
+
+# Uma lista de fontes e quase toda URL; prosa quase nunca tem. Os limites
+# separam com folga os casos reais medidos no corpus: 0.08 nos dois titulos
+# de secao do corpo, 0.65 e 0.81 nas duas listas de fontes.
+#
+# Nao unificar isso aplicando a densidade tambem ao cabecalho marcado: ela
+# REPROVA tres listas de fontes reais, porque densidade mede formato, nao
+# natureza — 0.32 num `.md` cujas entradas ocupam varias linhas, e 2 URLs
+# (abaixo do minimo) numa lista legitimamente pequena.
+_MIN_LIST_URLS = 3
+_MIN_URL_LINE_RATIO = 0.4
+
+
+def _dominated_by_urls(tail: str) -> bool:
+    """`True` se `tail` tem cara de lista de fontes: varias URLs, e elas
+    dominam as linhas nao vazias."""
+    lines = [stripped for stripped in (line.strip() for line in tail.splitlines()) if stripped]
+    urls = sum(1 for line in lines if "://" in line)
+    return urls >= _MIN_LIST_URLS and urls >= len(lines) * _MIN_URL_LINE_RATIO
+
 
 _ASTERISM = "⁂"
 _ASTERISM_TOKEN_RE = re.compile(
@@ -296,9 +336,16 @@ def find_reference_section(text: str) -> tuple[int, int] | None:
     Parte da ULTIMA ancora — importa quando um cabecalho "Referências"
     existe cedo no documento mas nao e o inicio real da lista — e RECUA
     para uma ancora anterior enquanto tudo entre as duas for lista de
-    fontes. O recuo cobre o caso do Perplexity: uma lista em prosa seguida
-    de outra, numerada, depois do `⁂`; sem ele a primeira lista ficava no
-    corpo e cada uma de suas entradas virava um "chunk" a julgar."""
+    fontes, para que a leitura da lista inclua a primeira delas quando as
+    duas sao contiguas (visto no Perplexity: uma lista em prosa seguida de
+    outra, numerada, depois do `⁂`).
+
+    NAO serve para decidir onde o corpo auditavel termina — para isso existe
+    `body_section_start`, que corta mais cedo. Esta ancora e a que os
+    parsers de lista usam, e precisa ser conservadora: recuar aqui sem que
+    as duas listas sejam contiguas faz o parser do `⁂` varrer entradas de
+    outro formato e fabricar referencias lixo (medido: 9 URLs `https:///[24][4]`
+    num PDF cuja lista principal traz marcador, nao URL, dentro do `<u>`)."""
     anchors: list[tuple[int, int]] = [
         (match.start(), match.end()) for match in _REFERENCE_SECTION_HEADING.finditer(text)
     ]
@@ -313,6 +360,37 @@ def find_reference_section(text: str) -> tuple[int, int] | None:
             break
         chosen = earlier
     return chosen
+
+
+def body_section_start(text: str) -> int | None:
+    """Onde o corpo auditavel termina, ou `None` se o documento nao tem
+    lista de fontes reconhecivel.
+
+    Deliberadamente MAIS CEDO que `find_reference_section`: nada depois de
+    um cabecalho de referencias e uma afirmacao a auditar, ainda que a lista
+    que o segue nao tenha o formato que os parsers reconhecem. O corte da
+    ancora de leitura falhava exatamente ai — ele exige que TODA linha entre
+    um cabecalho e a lista final carregue URL, e o conversor de PDF empurra
+    a URL de uma entrada para a linha seguinte. O resultado eram entradas da
+    lista virando afirmacoes julgadas: 59 num corpus de 27 arquivos, entre
+    elas fragmentos de data de bibliografia ("Mar 2026.") indo ao juiz LLM.
+
+    Os dois cortes ficam separados de proposito; a invariante e
+    `body_section_start <= find_reference_section`, nao igualdade."""
+    candidates = [
+        match.start()
+        for match in _REFERENCE_SECTION_HEADING.finditer(text)
+        if "://" in text[match.start() :]
+    ]
+    candidates += [
+        match.start()
+        for match in _BARE_REFERENCE_HEADING.finditer(text)
+        if _dominated_by_urls(text[match.start() :])
+    ]
+    anchor = find_reference_section(text)
+    if anchor is not None:
+        candidates.append(anchor[0])
+    return min(candidates) if candidates else None
 
 
 def _reference_section_tail(text: str) -> str | None:

@@ -186,7 +186,7 @@ def test_marker_without_a_reference_entry_still_becomes_a_chunk():
     )
     assert len(chunks) == 1
     assert chunks[0].cited_reference_ids == []
-    assert chunks[0].text == "Uma afirmação citando algo fora da lista"
+    assert chunks[0].text == "Uma afirmação citando algo fora da lista."
 
 
 def test_chunk_records_the_marker_it_actually_uses():
@@ -254,3 +254,66 @@ class TestRobustnessAcrossInputShapes:
             assert chunk.text.strip() == chunk.text and chunk.text
         positions = [c.position for c in chunks]
         assert positions == list(range(len(chunks)))
+
+
+class TestSentenceTail:
+    """O marcador também sustenta o RESTO da frase dele. Sem isso, uma
+    citação no meio da frase ficava só com o pedaço anterior a ela, e a parte
+    que qualifica o dado era descartada por não ter marcador próprio."""
+
+    def test_mid_sentence_marker_recovers_the_rest_of_the_sentence(self):
+        text = (
+            "HPV vaccination reduces cervical cancer by 60–90%, with the greatest protection when [1] "
+            "vaccination occurs before age 17."
+        )
+        chunks = AnswerChunker().chunk(text, answer_id="a1", references=[_ref("refA", ["[1]"])])
+
+        assert len(chunks) == 1
+        assert chunks[0].text.endswith("vaccination occurs before age 17.")
+        assert "protection when" in chunks[0].text
+
+    def test_marker_before_the_final_period_recovers_the_period(self):
+        chunks = AnswerChunker().chunk(
+            "Uma afirmação qualquer [1]. Outra coisa [2].", answer_id="a1",
+            references=[_ref("refA", ["[1]"]), _ref("refB", ["[2]"])],
+        )
+        assert [c.text for c in chunks] == ["Uma afirmação qualquer.", "Outra coisa."]
+
+    def test_two_markers_in_one_sentence_do_not_overlap(self):
+        """A cauda entre os dois pertence ao segundo, pela regra de
+        walk-back — o primeiro não pode levá-la."""
+        chunks = AnswerChunker().chunk(
+            "Vale para A [1] e também para B [2].", answer_id="a1",
+            references=[_ref("refA", ["[1]"]), _ref("refB", ["[2]"])],
+        )
+        assert [c.text for c in chunks] == ["Vale para A", "e também para B."]
+
+    def test_marker_glued_to_a_finished_sentence_does_not_absorb_the_next(self):
+        chunks = AnswerChunker().chunk(
+            "Primeira frase termina aqui.[4] Segunda frase é outra coisa.", answer_id="a1",
+            references=[_ref("refD", ["[4]"])],
+        )
+        assert len(chunks) == 1
+        assert chunks[0].text == "Primeira frase termina aqui."
+        assert "Segunda frase" not in chunks[0].text
+
+    def test_marker_on_the_sentence_boundary_keeps_its_own_chunk(self):
+        """Regressão: em "...quando [1] a frase termina.[2]" o `[2]` fica
+        exatamente na fronteira. Levar a cauda para o `[1]` deixava o `[2]`
+        sem trecho e apagava uma citação da auditoria."""
+        chunks = AnswerChunker().chunk(
+            "O estudo mostrou que [1] a redução foi consistente.[2] Outro ponto [3].", answer_id="a1",
+            references=[_ref("refA", ["[1]"]), _ref("refB", ["[2]"]), _ref("refC", ["[3]"])],
+        )
+        cited = [c.cited_reference_ids for c in chunks]
+        assert ["refB"] in cited, "o [2] perdeu o chunk dele"
+        assert ["refA"] in cited and ["refC"] in cited
+
+    def test_marker_at_the_start_of_a_line_stays_discarded(self):
+        """Regressão: marcador sem NADA antes dele é entrada de lista de
+        fontes (`[1] Título da obra.`), não afirmação. A cauda não pode
+        ressuscitar esses trechos — e a checagem de conteúdo precisa ignorar
+        as tags, porque `<u>` tem uma letra dentro."""
+        for text in ("[1] World Journal of Oncology.", "> <u>[1]</u> Frontiers | Cervical cancer review"):
+            chunks = AnswerChunker().chunk(text, answer_id="a1", references=[_ref("refA", ["[1]"])])
+            assert chunks == [], f"nao deveria emitir chunk para {text!r}"

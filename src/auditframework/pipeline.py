@@ -16,8 +16,8 @@ from .config import Settings
 from .extraction.loaders import load_answer
 from .extraction.reference_extractor import (
     ReferenceExtractionStrategy,
+    body_section_start,
     extract_references,
-    find_reference_section,
 )
 from .common.llm_client import LLMClient, create_llm_client
 from .common.pricing import is_cost_tracked
@@ -56,13 +56,14 @@ def _strip_reference_section(text: str) -> str:
     sao apenas citacoes (visto no Perplexity, que ancora a lista so pelo
     separador `⁂`, sem cabecalho).
 
-    Usa a MESMA ancora que a extracao de referencias
-    (`find_reference_section`), para que o corpo e a lista sejam
-    exatamente complementares — antes cada lado decidia o corte por conta
-    propria (um pegava o primeiro `⁂`, o outro o ultimo) e um trecho podia
-    cair nos dois ou em nenhum."""
-    anchor = find_reference_section(text)
-    return text if anchor is None else text[: anchor[0]].rstrip()
+    Corta em `body_section_start`, que e igual ou anterior a ancora usada
+    pela leitura da lista (`find_reference_section`) — as duas nao podem ser
+    a mesma: a ancora de leitura precisa ser conservadora para os parsers, e
+    ser conservadora aqui deixava a lista de fontes dentro do corpo. Nada
+    fica de fora dos dois lados, porque o que este corte tira a mais e
+    justamente a regiao da lista."""
+    start = body_section_start(text)
+    return text if start is None else text[:start].rstrip()
 
 
 class PipelineStage(Protocol):

@@ -178,9 +178,17 @@ class TestStripAsterismList:
         text = "Corpo [1].\n\n⁂\n\n1. <u>https://a.com</u>\n2. <u>https://b.com</u>"
         assert _strip_reference_section(text) == "Corpo [1]."
 
-    def test_uses_the_later_anchor_when_both_heading_and_asterism_exist(self):
-        text = "## Referências no meio do texto\n\nCorpo [1].\n\n⁂\n\n1. https://a.com"
-        assert _strip_reference_section(text) == "## Referências no meio do texto\n\nCorpo [1]."
+    def test_cuts_at_the_heading_even_when_a_later_asterism_exists(self):
+        """Corta no cabeçalho, não na última âncora: quando as duas existem,
+        o Perplexity emite `References` (a numeração que o corpo cita) e
+        depois `⁂` (todas as fontes consultadas), e a lista do meio ficava
+        no corpo — 59 entradas de lista viraram afirmações julgadas no
+        corpus. O preço é este caso: um cabeçalho de fontes *com* marcação
+        markdown seguido de prosa perde essa prosa. Não ocorre em nenhum dos
+        27 arquivos reais; o caso que ocorre (título de seção do corpo como
+        `Fontes oficiais`) chega sem marcação e é barrado pela densidade."""
+        text = "## Referências\n\nCorpo [1].\n\n⁂\n\n1. https://a.com"
+        assert _strip_reference_section(text) == ""
 
 
 class TestSmallModelHeuristic:
