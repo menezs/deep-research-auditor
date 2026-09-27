@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ from auditframework.pipeline import (
     Pipeline,
     ReportingStage,
     RunContext,
+    _load_answer_chunks,
     _strip_reference_section,
     build_pipeline,
     load_run_context,
@@ -196,3 +198,31 @@ class TestSmallModelHeuristic:
 
         for m in ("openai/gpt-oss-20b", "llama-3.1-8b", "claude-sonnet-5", "qwen2.5-32b"):
             assert _looks_like_small_model(m) is False, m
+
+
+class TestLoadingChunksFromOlderRuns:
+    """Runs gravadas antes de os chunks sem citação deixarem de existir
+    ainda têm esses registros em `answer_chunks.json`."""
+
+    def _write(self, run_dir: Path, records: list[dict]) -> None:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "answer_chunks.json").write_text(json.dumps(records), encoding="utf-8")
+
+    def test_uncited_chunks_from_an_old_run_are_dropped(self, tmp_path: Path):
+        self._write(tmp_path, [
+            {"id": "a1-0", "answer_id": "a1", "position": 0, "text": "Prosa sem fonte.",
+             "cited_reference_ids": [], "is_uncited_claim": True},
+            {"id": "a1-1", "answer_id": "a1", "position": 1, "text": "Afirmação citada.",
+             "cited_reference_ids": ["r1"], "is_uncited_claim": False},
+        ])
+        chunks = _load_answer_chunks(tmp_path)
+        assert [c.id for c in chunks] == ["a1-1"]
+
+    def test_chunk_whose_marker_has_no_entry_is_kept(self, tmp_path: Path):
+        """Tem citação, só não tem entrada na lista — é auditável como
+        SKIPPED com motivo próprio, não é um trecho sem citação."""
+        self._write(tmp_path, [
+            {"id": "a1-0", "answer_id": "a1", "position": 0, "text": "Cita [9], que não está na lista.",
+             "cited_reference_ids": [], "is_uncited_claim": False},
+        ])
+        assert [c.id for c in _load_answer_chunks(tmp_path)] == ["a1-0"]

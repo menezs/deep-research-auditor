@@ -1,20 +1,59 @@
 from __future__ import annotations
 
 import re
+from collections import defaultdict
 from pathlib import Path
-from typing import Protocol
-from urllib.parse import unquote
+from typing import NamedTuple, Protocol
+from urllib.parse import unquote, urlsplit
 
 from pydantic import BaseModel, Field
 
 from ..common.errors import LLMParseError
 from ..common.llm_client import LLMClient
+from ..logging_config import get_logger
 from ..models import Reference
 from .pdf_links import extract_pdf_hyperlink_urls
-from .url_normalizer import normalize_url
+from .url_normalizer import normalize_url, work_key
+
+logger = get_logger(__name__)
 
 _MARKER_RUN = re.compile(r"(?:\[\s*(\d+)\s*\]\s*)+")
-_URL_RE = re.compile(r'https?://[^\s<>\[\]()"]+')
+
+# Parenteses NAO sao excluidos daqui: URLs reais os contem com frequencia
+# (PII do Lancet, "PIIS0140-6736(21)02178-4"; artigo da Wikipedia com
+# desambiguacao, "Foo_(disambiguation)"; PDF com "(1)" no nome). Um `)` que
+# na verdade fecha markdown/prosa em volta da URL e removido depois por
+# `_balance_parens`, contando abre/fecha — nunca por exclusao no regex, que
+# cortaria a URL bem antes do `)` que pertence a ela. Cada URL truncada
+# assim virava uma "obra" falsamente exclusiva na analise de intersecao.
+_URL_RE = re.compile(r'https?://[^\s<>\[\]"]+')
+
+# Pontuacao de prosa que pode encostar no fim de uma URL. Sem `)` — esse e
+# decidido por `_balance_parens`, nao por remocao cega.
+_URL_TRAILING_JUNK = ".,;:”\"'）]>»"
+
+
+def _balance_parens(url: str) -> str:
+    """Remove `)` finais que fecham parenteses de FORA da URL (prosa ou
+    markdown em volta dela, ex: "(ver https://x.com/a)"), preservando os
+    que pertencem a URL de verdade — esses ficam balanceados e a contagem
+    para de remover."""
+    while url.endswith(")") and url.count("(") < url.count(")"):
+        url = url[:-1]
+    return url
+
+
+def _clean_url(url: str) -> str:
+    """Tira pontuacao de prosa colada ao fim da URL, alternando com o
+    balanceamento de parenteses ate estabilizar (ex: `...artigo).` precisa
+    de duas passadas)."""
+    previous = None
+    while url != previous:
+        previous = url
+        url = url.rstrip(_URL_TRAILING_JUNK)
+        url = _balance_parens(url)
+    return url
+
 
 _REFERENCE_SECTION_HEADING = re.compile(
     r"^#{1,6}\s*\**\s*(refer[eê]ncias|references|fontes|sources|bibliografia)\b",
@@ -55,7 +94,27 @@ def _extract_url(text: str) -> tuple[str, int] | None:
     trailing = text[match.end() :].strip()
     if trailing and " " not in trailing and not trailing.startswith("<"):
         url += trailing
-    return url, match.start()
+    return _clean_url(url), match.start()
+
+
+# Prioridade da lista de onde a entrada veio, quando o documento tem MAIS DE
+# UMA lista de fontes. O Perplexity emite duas: uma ancorada pelo cabecalho
+# (`## References`), cuja numeracao e a que o corpo do texto cita, e outra
+# depois do separador `⁂`, que enumera todas as fontes consultadas de 1 a N
+# de novo. A mesma URL aparece nas duas sob numeros diferentes; sem
+# prioridade, a referencia acumulava os dois numeros e o relatorio mostrava
+# "cita [1] [26]" para um trecho que cita so `[1]`.
+_PRIORITY_PRIMARY = 0
+_PRIORITY_SECONDARY = 1
+
+
+class _Entry(NamedTuple):
+    """Uma entrada da lista de fontes, antes de virar `Reference`."""
+
+    markers: list[str]
+    title: str
+    url: str
+    priority: int = _PRIORITY_PRIMARY
 
 
 class ReferenceExtractionStrategy(Protocol):
@@ -111,31 +170,54 @@ class RegexReferenceExtractor:
 
     def extract(self, text: str, *, source_answer_id: str, tool_name: str) -> list[Reference]:
         by_id: dict[str, Reference] = {}
+        priority_by_id: dict[str, int] = {}
         entries = _find_reference_entries(text) + _find_asterism_entries(text)
         if not entries:
             entries = _find_heading_titled_pairs(text)
-        for markers, title, raw_url in entries:
-            normalized = normalize_url(raw_url)
+        for entry in entries:
+            normalized = normalize_url(entry.url)
             ref_id = Reference.id_for_url(normalized)
             existing = by_id.get(ref_id)
-            if existing is not None:
-                merged_markers = list(dict.fromkeys(existing.citation_markers + markers))
-                by_id[ref_id] = existing.model_copy(update={"citation_markers": merged_markers})
+            if existing is None:
+                by_id[ref_id] = Reference(
+                    id=ref_id,
+                    citation_markers=entry.markers,
+                    raw_url=entry.url,
+                    normalized_url=normalized,
+                    work_key=work_key(entry.url),
+                    from_secondary_list=entry.priority == _PRIORITY_SECONDARY,
+                    title=entry.title or None,
+                    source_answer_id=source_answer_id,
+                    tool_name=tool_name,
+                )
+                priority_by_id[ref_id] = entry.priority
                 continue
-            by_id[ref_id] = Reference(
-                id=ref_id,
-                citation_markers=markers,
-                raw_url=raw_url,
-                normalized_url=normalized,
-                title=title or None,
-                source_answer_id=source_answer_id,
-                tool_name=tool_name,
-            )
+
+            # A mesma URL de novo. Vinda de uma lista de prioridade MENOR (a
+            # do `⁂`), o numero dela e descartado: quem cita no corpo e a
+            # numeracao da lista principal. Da MESMA lista, os numeros se
+            # somam — e o caso legitimo de "[1] [3] [7] Titulo" apontando
+            # para uma URL so, e o corpo pode citar qualquer um deles.
+            best = priority_by_id[ref_id]
+            if entry.priority > best:
+                logger.info(
+                    "numero(s) %s da lista secundaria de fontes descartado(s): %s ja esta listada como %s",
+                    ", ".join(entry.markers) or "(sem numero)",
+                    entry.url,
+                    ", ".join(existing.citation_markers) or "(sem numero)",
+                )
+                continue
+            if entry.priority < best:
+                update = {"citation_markers": entry.markers, "from_secondary_list": False}
+                priority_by_id[ref_id] = entry.priority
+            else:
+                update = {"citation_markers": list(dict.fromkeys(existing.citation_markers + entry.markers))}
+            by_id[ref_id] = existing.model_copy(update=update)
         return list(by_id.values())
 
 
-def _find_reference_entries(text: str) -> list[tuple[list[str], str, str]]:
-    entries: list[tuple[list[str], str, str]] = []
+def _find_reference_entries(text: str) -> list[_Entry]:
+    entries: list[_Entry] = []
     lines = text.splitlines()
     for i, line in enumerate(lines):
         stripped = line.strip()
@@ -149,7 +231,7 @@ def _find_reference_entries(text: str) -> list[tuple[list[str], str, str]]:
         if found is not None:
             url, url_start = found
             title = rest[:url_start].strip()
-            entries.append((markers, title, url))
+            entries.append(_Entry(markers, title, url))
             continue
 
         # URL nao esta na mesma linha dos marcadores: procura nas linhas
@@ -174,35 +256,71 @@ def _find_reference_entries(text: str) -> list[tuple[list[str], str, str]]:
             title_parts.append(candidate)
 
         if found_url:
-            entries.append((markers, " ".join(title_parts).strip(), found_url))
+            entries.append(_Entry(markers, " ".join(title_parts).strip(), found_url))
 
     return entries
 
 
-def _reference_section_tail(text: str) -> str | None:
-    """Retorna o texto a partir de onde a lista de fontes comeca, usando
-    qualquer uma das duas ancoras ja observadas: o separador `⁂`
-    (Perplexity) ou o cabecalho da secao de referencias
-    (`_REFERENCE_SECTION_HEADING`, ex: ChatGPT/Gemini) — a que vier POR
-    ULTIMO no texto, se houver mais de uma. Usar a ultima (nao a
-    primeira) importa quando um cabecalho chamado "Referências" existe
-    cedo no documento mas NAO e o inicio real da lista (ex: um resumo com
-    lista numerada propria antes do `⁂` de verdade) — nesse caso a ancora
-    mais especifica e proxima da lista de fato deve vencer. `None` se
-    nenhuma ancora existir (documento em formato desconhecido)."""
-    starts: list[int] = []
-    asterism_pos = text.find(_ASTERISM)
-    if asterism_pos != -1:
-        starts.append(asterism_pos + 1)
-    heading_match = _REFERENCE_SECTION_HEADING.search(text)
-    if heading_match is not None:
-        starts.append(heading_match.end())
-    if not starts:
+def _only_reference_lines(chunk: str) -> bool:
+    """`True` se `chunk` contem apenas linhas que carregam URL, cabecalhos e
+    o separador `⁂` — nenhuma linha de prosa comum.
+
+    Exige URL na linha, nao so um prefixo de entrada (`1.` / `[1]`): uma
+    lista numerada de resumo no corpo da resposta ("1. **Fonte A** - resumo
+    qualquer") tem exatamente a mesma forma de uma entrada de referencia
+    sem URL, e confundir as duas arrastaria o resumo para dentro da lista de
+    fontes. Entrada real cuja URL esta na linha SEGUINTE tambem bloqueia o
+    recuo — conservador de proposito: na duvida, mantem o corte na ancora
+    mais proxima da lista."""
+    for line in chunk.splitlines():
+        stripped = line.strip()
+        if not stripped or _ASTERISM in stripped or stripped.startswith("#"):
+            continue
+        if "://" in stripped or not stripped.strip("|").strip():  # URL, ou pipe-arte vazia
+            continue
+        return False
+    return True
+
+
+def find_reference_section(text: str) -> tuple[int, int] | None:
+    """`(inicio da ancora, inicio do conteudo depois dela)` para onde a
+    lista de fontes comeca, ou `None` se nenhuma ancora existir (documento
+    em formato desconhecido).
+
+    Ancoras: o separador `⁂` (Perplexity) e o cabecalho da secao de
+    referencias (`_REFERENCE_SECTION_HEADING`, ex: ChatGPT/Gemini). So
+    conta ancora que tenha URL depois dela — testado por `://`, nao por
+    `http`, porque uma URL corrompida por ligadura tipografica do PDF chega
+    aqui como `htps://` e ainda assim e a lista de fontes.
+
+    Parte da ULTIMA ancora — importa quando um cabecalho "Referências"
+    existe cedo no documento mas nao e o inicio real da lista — e RECUA
+    para uma ancora anterior enquanto tudo entre as duas for lista de
+    fontes. O recuo cobre o caso do Perplexity: uma lista em prosa seguida
+    de outra, numerada, depois do `⁂`; sem ele a primeira lista ficava no
+    corpo e cada uma de suas entradas virava um "chunk" a julgar."""
+    anchors: list[tuple[int, int]] = [
+        (match.start(), match.end()) for match in _REFERENCE_SECTION_HEADING.finditer(text)
+    ]
+    anchors += [(match.start(), match.end()) for match in re.finditer(_ASTERISM, text)]
+    anchors = sorted(anchor for anchor in anchors if "://" in text[anchor[0] :])
+    if not anchors:
         return None
-    return text[max(starts) :]
+
+    chosen = anchors[-1]
+    for earlier in reversed(anchors[:-1]):
+        if not _only_reference_lines(text[earlier[1] : chosen[0]]):
+            break
+        chosen = earlier
+    return chosen
 
 
-def _find_asterism_list_entries(text: str) -> list[tuple[list[str], str, str]]:
+def _reference_section_tail(text: str) -> str | None:
+    anchor = find_reference_section(text)
+    return None if anchor is None else text[anchor[1] :]
+
+
+def _find_asterism_list_entries(text: str) -> list[_Entry]:
     """Extrai uma lista de fontes numerada (sem colchetes), apos um
     separador "asterismo" (⁂, Perplexity) ou um cabecalho de secao de
     referencias (ChatGPT/Gemini, ver `_reference_section_tail`) — formato
@@ -233,9 +351,17 @@ def _find_asterism_list_entries(text: str) -> list[tuple[list[str], str, str]]:
     if tail is None:
         return []
 
-    entries: list[tuple[list[str], str, str]] = []
+    # Quando o trecho comeca no cabecalho e o `⁂` aparece mais adiante, ele
+    # separa duas listas: a de cima e a numeracao que o corpo cita
+    # (prioridade maior). `-1` (o proprio `⁂` era a ancora, ou nao existe)
+    # significa lista unica — tudo com a mesma prioridade, e o merge volta a
+    # somar os numeros como antes.
+    asterism_pos = tail.find(_ASTERISM)
+
+    entries: list[_Entry] = []
     current_marker: str | None = None
     current_parts: list[str] = []
+    current_priority = _PRIORITY_PRIMARY
 
     def flush() -> None:
         if current_marker is None or not current_parts:
@@ -243,7 +369,7 @@ def _find_asterism_list_entries(text: str) -> list[tuple[list[str], str, str]]:
         joined = "".join(part.replace("\n", "").replace("\r", "").replace("\t", " ") for part in current_parts)
         url = joined.strip().replace(" ", "%20")
         if url:
-            entries.append(([f"[{current_marker}]"], "", url))
+            entries.append(_Entry([f"[{current_marker}]"], "", url, current_priority))
 
     for match in _ASTERISM_TOKEN_RE.finditer(tail):
         marker = match.group("marker")
@@ -251,6 +377,9 @@ def _find_asterism_list_entries(text: str) -> list[tuple[list[str], str, str]]:
             flush()
             current_marker = marker
             current_parts = []
+            current_priority = (
+                _PRIORITY_SECONDARY if 0 <= asterism_pos <= match.start() else _PRIORITY_PRIMARY
+            )
         else:
             current_parts.append(match.group("url_part"))
     flush()
@@ -258,7 +387,7 @@ def _find_asterism_list_entries(text: str) -> list[tuple[list[str], str, str]]:
     return entries
 
 
-def _find_asterism_bare_url_entries(text: str) -> list[tuple[list[str], str, str]]:
+def _find_asterism_bare_url_entries(text: str) -> list[_Entry]:
     """Fallback para quando a lista pos-⁂ nao tem nenhuma numeracao (nem
     `N.`, nem `<u>` — formato observado em respostas .docx do Perplexity,
     convertidas via `python-docx`, que nao produzem marcacao nenhuma ao
@@ -278,7 +407,7 @@ def _find_asterism_bare_url_entries(text: str) -> list[tuple[list[str], str, str
         return []
     tail = text[asterism_pos + 1 :]
 
-    entries: list[tuple[list[str], str, str]] = []
+    entries: list[_Entry] = []
     position = 0
     for line in tail.splitlines():
         stripped = line.strip()
@@ -287,14 +416,14 @@ def _find_asterism_bare_url_entries(text: str) -> list[tuple[list[str], str, str
         match = _URL_RE.search(stripped)
         if match is None:
             continue
-        url = stripped[match.start() :].strip().replace(" ", "%20")
+        url = _clean_url(stripped[match.start() :].strip().replace(" ", "%20"))
         position += 1
-        entries.append(([f"[{position}]"], "", url))
+        entries.append(_Entry([f"[{position}]"], "", url))
 
     return entries
 
 
-def _find_asterism_entries(text: str) -> list[tuple[list[str], str, str]]:
+def _find_asterism_entries(text: str) -> list[_Entry]:
     """Escolhe entre os dois formatos de lista pos-⁂ ja observados: a
     numerada (`_find_asterism_list_entries`, ex: PDF do Perplexity) tem
     prioridade; se ela nao achar nada mas o `⁂` existir, cai para o
@@ -306,7 +435,7 @@ def _find_asterism_entries(text: str) -> list[tuple[list[str], str, str]]:
     return _find_asterism_bare_url_entries(text)
 
 
-def _find_heading_titled_pairs(text: str) -> list[tuple[list[str], str, str]]:
+def _find_heading_titled_pairs(text: str) -> list[_Entry]:
     """Ultimo fallback: lista de fontes sem NENHUMA marcacao — nem
     colchetes, nem numeracao, nem `<u>`, nem `⁂` — apenas "Titulo, URL"
     por linha, ancorada so pelo cabecalho da secao de referencias
@@ -329,7 +458,7 @@ def _find_heading_titled_pairs(text: str) -> list[tuple[list[str], str, str]]:
         return []
     tail = text[heading_match.end() :]
 
-    entries: list[tuple[list[str], str, str]] = []
+    entries: list[_Entry] = []
     position = 0
     for line in tail.splitlines():
         stripped = line.strip()
@@ -338,10 +467,10 @@ def _find_heading_titled_pairs(text: str) -> list[tuple[list[str], str, str]]:
         match = _URL_RE.search(stripped)
         if match is None:
             continue
-        url = stripped[match.start() :].strip()
+        url = _clean_url(stripped[match.start() :].strip())
         title = stripped[: match.start()].rstrip(" ,").strip()
         position += 1
-        entries.append(([f"[{position}]"], title, url))
+        entries.append(_Entry([f"[{position}]"], title, url))
 
     return entries
 
@@ -392,15 +521,45 @@ def _best_matching_known_url(url: str, known_urls: set[str]) -> str | None:
     "caractere extra" (nunca e subsequencia de uma string MAIS CURTA) sem
     precisar de um limiar ajustado a dedo."""
     key = _fuzzy_url_key(url)
+    # `known_urls` e um set: ordena para que, havendo mais de um candidato
+    # aceitavel, o reparo seja deterministico entre execucoes.
+    candidates = sorted(known_urls)
+
+    for known in candidates:
+        if key == _fuzzy_url_key(known):
+            return known
+
+    # Prefixo: a URL extraida e um prefixo de uma URL embutida e perdeu o
+    # final numa quebra de linha — o ULTIMO segmento inteiro
+    # (".../businesses-and-occupations/" sem "samsung-electronics-co-ltd") ou
+    # o fim de um segmento no MEIO dele (".../making-the-case-for-a-four" sem
+    # "-day-working-week/"). O segundo caso nao deixa sinal nenhum de
+    # corrupcao e perde caracteres demais para o orcamento de ligadura.
+    #
+    # Aceita continuacao de no maximo UM segmento: varios segmentos a mais
+    # sao outra pagina, mais profunda, nao a mesma truncada. Exige unicidade,
+    # porque "/artigo" e prefixo legitimo de "/artigo-2" — havendo dois
+    # candidatos nada e reparado. Exige path alem da raiz, para nunca
+    # transformar um host nu numa pagina qualquer dele.
+    if urlsplit(url).path.strip("/"):
+        prefixed = {
+            base
+            for base in (known.split("#", 1)[0] for known in candidates)
+            if base != url and base.startswith(url) and "/" not in base[len(url) :].strip("/")
+        }
+        if len(prefixed) == 1:
+            return prefixed.pop()
+
     best_url: str | None = None
     best_drop = _MAX_DROPPED_CHARS + 1
-    for known in known_urls:
-        known_key = _fuzzy_url_key(known)
-        if key == known_key:
-            return known
-        drop = len(known_key) - len(key)
-        if 0 < drop < best_drop and drop <= _MAX_DROPPED_CHARS and _is_subsequence(key, known_key):
-            best_url, best_drop = known, drop
+    for known in candidates:
+        # Compara sem o fragmento: um reparo nunca deve ACRESCENTAR um
+        # `#:~:text=` (destaque que o navegador poe na URL copiada) a uma
+        # URL que o documento cita sem ele.
+        base = known.split("#", 1)[0]
+        drop = len(_fuzzy_url_key(base)) - len(key)
+        if 0 < drop < best_drop and _is_subsequence(key, _fuzzy_url_key(base)):
+            best_url, best_drop = base, drop
     return best_url
 
 
@@ -428,18 +587,157 @@ def _repair_using_pdf_links(references: list[Reference], known_urls: set[str]) -
                 update={
                     "raw_url": fixed_url,
                     "normalized_url": normalized,
+                    "work_key": work_key(fixed_url),
                     "id": Reference.id_for_url(normalized),
                 }
             )
 
         existing = by_id.get(repaired.id)
-        if existing is not None:
-            merged_markers = list(dict.fromkeys(existing.citation_markers + repaired.citation_markers))
-            by_id[repaired.id] = existing.model_copy(update={"citation_markers": merged_markers})
-        else:
+        if existing is None:
             by_id[repaired.id] = repaired
+            continue
+
+        # Duas entradas que so viraram a MESMA URL depois do reparo. Acontece
+        # porque o conversor corrompeu cada ocorrencia de um jeito diferente
+        # ("firmsin" numa, "bigg est" na outra), entao elas passaram pela
+        # deduplicacao de `extract` como URLs distintas. Vale a mesma
+        # prioridade daquela etapa, agora lida de `from_secondary_list`:
+        # entre listas diferentes, fica o numero da principal (a numeracao
+        # que o corpo cita); da mesma lista, os numeros se somam, porque o
+        # corpo pode citar qualquer um deles.
+        if existing.from_secondary_list == repaired.from_secondary_list:
+            merged = list(dict.fromkeys(existing.citation_markers + repaired.citation_markers))
+            by_id[repaired.id] = existing.model_copy(update={"citation_markers": merged})
+            continue
+        principal, secondary = (
+            (existing, repaired) if repaired.from_secondary_list else (repaired, existing)
+        )
+        logger.info(
+            "numero(s) %s da lista secundaria descartado(s): apos o reparo pelos hyperlinks do PDF, "
+            "%s e a mesma URL listada como %s",
+            ", ".join(secondary.citation_markers) or "(sem numero)",
+            repaired.raw_url,
+            ", ".join(principal.citation_markers) or "(sem numero)",
+        )
+        by_id[repaired.id] = principal.model_copy(update={"from_secondary_list": False})
 
     return list(by_id.values())
+
+
+# Referencia injetada pelo exportador de PDF: guia de como formatar citacao
+# academica, documentacao da propria ferramenta, forum sobre como pedir
+# citacoes a uma IA — nao e fonte do conteudo do relatorio. Observado no PDF
+# do Perplexity: uma lista real curta seguida de dezenas de entradas
+# numeradas, em formato identico as reais, mas sobre COMO citar. Nao tem
+# posicao fixa em relacao ao `⁂`, entao o filtro e por conteudo da URL, nao
+# por posicao no bloco. Lista aberta — caso novo encontrado no corpus entra
+# aqui, com o arquivo/ferramenta onde apareceu.
+_CONTAMINATION_PATTERNS = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"scribbr\.com",
+        r"guides\.lib\.",
+        r"/writing-guide/",
+        r"numbered_citation_style",
+        r"rag-citations",
+        r"citing-references-in-text",
+        r"in-text-citation",
+        r"cse8-sequence-in-text",
+        r"how-can-i-get-ai-to-give-factual-answers",  # Workday/Perplexity run 2
+        r"docs\.perplexity\.ai",
+        # Perplexity/four-day-week run 1: asme.org "elements-of-a-paper".
+        r"/author-guidelines/",
+        r"elements-of-a-paper",
+    )
+]
+
+
+def _drop_colliding_markers(references: list[Reference]) -> list[Reference]:
+    """Garante que cada marcador `[N]` resolva para UMA referencia.
+
+    Uma resposta do Perplexity ja observada traz duas listas de fontes — uma
+    sob o cabecalho e outra depois do `⁂` — ambas numeradas a partir de 1.
+    As duas sao lidas (a de cima e a que o corpo cita; a de baixo traz
+    fontes que so aparecem nela), mas as numeracoes colidem: `[3]` existia
+    em duas referencias, e `_build_marker_index` resolvia pela ultima,
+    dependendo da ordem do dict. O relatorio ficava autocontraditorio —
+    "cita [3], corroborado por [3]".
+
+    Mantem a primeira reivindicacao em ordem de documento e tira o marcador
+    das seguintes. A referencia em si nao e descartada: ela continua
+    listada, e sem marcador aparece como "listada mas nunca citada", que e
+    exatamente o que se pode afirmar sobre ela.
+
+    Artefato do exportador resolve depois de todo mundo: ele nao tem posicao
+    fixa no documento e pode aparecer ANTES de uma fonte real que use o
+    mesmo numero — sem isso, um guia de formatacao de citacao roubaria o
+    numero de uma fonte de verdade so por vir primeiro."""
+    claimed: dict[str, str] = {}
+    kept_by_id: dict[str, list[str]] = {}
+    # `sorted` e estavel: fontes reais na ordem do documento, artefatos depois.
+    for reference in sorted(references, key=lambda r: r.exporter_artifact):
+        kept = [m for m in reference.citation_markers if claimed.setdefault(m, reference.id) == reference.id]
+        kept_by_id[reference.id] = kept
+        dropped = [m for m in reference.citation_markers if m not in kept]
+        if dropped:
+            logger.warning(
+                "marcador(es) %s de %s ja pertencem a outra referencia da lista (numeracao repetida "
+                "em duas listas de fontes) — mantida a primeira ocorrencia",
+                ", ".join(dropped),
+                reference.raw_url,
+            )
+    # devolve na ordem original: quem consome `references.json` espera a
+    # ordem do documento, nao a da resolucao de conflito
+    return [
+        reference if kept_by_id[reference.id] == reference.citation_markers
+        else reference.model_copy(update={"citation_markers": kept_by_id[reference.id]})
+        for reference in references
+    ]
+
+
+def _warn_duplicate_works(references: list[Reference]) -> None:
+    """Avisa quando a MESMA obra foi listada sob marcadores diferentes (ex:
+    o mesmo artigo pelo PubMed e pelo DOI). Nao deduplica: os dois
+    enderecos continuam sendo verificados a parte, porque cada um expoe uma
+    quantidade diferente do texto. O aviso importa porque duas entradas da
+    mesma obra citadas lado a lado (`[3] [4]`) produzem aparencia de
+    corroboracao independente a partir de uma fonte so."""
+    by_work: dict[str, list[Reference]] = defaultdict(list)
+    for reference in references:
+        if reference.work_key:
+            by_work[reference.work_key].append(reference)
+    for key, group in by_work.items():
+        if len(group) > 1:
+            logger.warning(
+                "obra %s listada %d vezes sob marcadores diferentes (%s) — corroboracao "
+                "aparente pode vir de uma fonte so",
+                key,
+                len(group),
+                ", ".join(m for r in group for m in r.citation_markers) or "sem marcador",
+            )
+
+
+def _mark_exporter_contamination(references: list[Reference]) -> list[Reference]:
+    """Marca (nao remove) as entradas injetadas pelo exportador.
+
+    Apagar tornava a exclusao inauditavel: nao havia como contar quantas
+    foram nem verificar que o filtro nao comeu uma fonte legitima — e os
+    padroes sao genericos o bastante para isso importar (um relatorio CUJO
+    TEMA seja citacao teria guias de citacao como fonte de verdade).
+    Marcadas, ficam no `references.json`, fora da ingestao e das metricas, e
+    viram um numero que o relatorio reporta."""
+    out: list[Reference] = []
+    for reference in references:
+        if any(p.search(reference.raw_url) for p in _CONTAMINATION_PATTERNS):
+            logger.warning(
+                "referencia %s marcada como artefato do exportador (guia de citacao/documentacao, "
+                "nao fonte do conteudo): %s — nao sera baixada nem auditada",
+                reference.citation_markers or reference.id,
+                reference.raw_url,
+            )
+            reference = reference.model_copy(update={"exporter_artifact": True})
+        out.append(reference)
+    return out
 
 
 def extract_references(
@@ -454,6 +752,9 @@ def extract_references(
     references = strategy.extract(text, source_answer_id=source_answer_id, tool_name=tool_name)
     if answer_path is not None and answer_path.suffix.lower() == ".pdf":
         references = _repair_using_pdf_links(references, extract_pdf_hyperlink_urls(answer_path))
+    references = _mark_exporter_contamination(references)
+    references = _drop_colliding_markers(references)
+    _warn_duplicate_works([r for r in references if not r.exporter_artifact])
     return references
 
 
@@ -514,6 +815,7 @@ class LLMReferenceExtractor:
                 citation_markers=item.citation_markers,
                 raw_url=item.url,
                 normalized_url=normalized,
+                work_key=work_key(item.url),
                 title=item.title,
                 source_answer_id=source_answer_id,
                 tool_name=tool_name,

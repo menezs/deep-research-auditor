@@ -107,8 +107,6 @@ class ReportRenderer:
             self._render_content_verification(),
             self._render_dead_and_inaccessible(),
             self._render_examples() if self._results else None,
-            self._render_uncited_claims(),
-            self._render_potentially_unsourced(),
             self._render_skipped_chunks(),
         ]
         parts = [self._render_header()]
@@ -177,6 +175,8 @@ class ReportRenderer:
         rows.append(
             ("Referências listadas", f"{si.references_listed} ({si.references_never_cited} nunca citadas)")
         )
+        if si.exporter_artifacts:
+            rows.append(("Descartadas como artefato do exportador", str(si.exporter_artifacts)))
         table = "**Arquivo de origem**\n\n| Campo | Valor |\n|---|---|\n" + "\n".join(
             f"| {label} | {value} |" for label, value in rows
         )
@@ -214,13 +214,12 @@ class ReportRenderer:
         body = "| Veredito | Chunks | Percentual |\n|---|---|---|\n" + table
         if report.count_partially_supported:
             body += (
-                f"\n\n> {report.count_partially_supported} de {report.count_supported} SUPPORTED têm "
-                "aspectos da afirmação não cobertos pela evidência (\"parcialmente suportada\") — ver Exemplos."
-            )
-        if report.count_uncited_claims:
-            body += (
-                f"\n\n> {report.count_uncited_claims} de {report.count_claim_chunks} trechos com afirmação "
-                "factual não têm nenhuma citação no documento — ver *Afirmações sem Citação*."
+                f"\n\n> **{report.count_partially_supported} dos {report.count_supported} SUPPORTED são "
+                "parciais.** A fonte citada sustenta a afirmação, mas o juiz apontou ao menos um aspecto "
+                "dela que a evidência não cobre (ex.: o número confere, a data não). Esses "
+                f"{report.count_partially_supported} estão **contados dentro** dos {report.count_supported} "
+                "— o framework não tem uma classe `PARTIAL`. O aspecto não coberto de cada um aparece na "
+                "seção *Exemplos por Veredito*."
             )
         return ReportSection("Distribuição de Vereditos", body)
 
@@ -419,7 +418,7 @@ class ReportRenderer:
         return ReportSection("Referências Mortas e Inacessíveis", "\n".join(lines))
 
     _SKIP_REASON_LABELS = {
-        "sem_citacao": "não citam nenhuma referência",
+        "citacao_sem_entrada": "citam um `[N]` que não existe na lista de referências",
         "ref_sem_conteudo": "citam referência não baixada/inacessível",
         "outro": "outro motivo",
     }
@@ -439,40 +438,6 @@ class ReportRenderer:
             lines.append("")
         lines.append("\n".join(f"- `{s.answer_chunk_id}` — {s.reason}" for s in skipped))
         return ReportSection("Chunks Não Auditados", "\n".join(lines))
-
-    def _render_uncited_claims(self) -> ReportSection | None:
-        items = self.report.uncited_claims
-        if not items:
-            return None
-        lines = [
-            f"**{self.report.count_uncited_claims} de {self.report.count_claim_chunks}** trechos com "
-            "afirmação factual não têm nenhuma citação no documento. O marcador `[N]` no fim de um "
-            "parágrafo sustenta aquele parágrafo; parágrafos anteriores sem marcador próprio entram aqui "
-            "— as afirmações abaixo não têm fonte associada:",
-            "",
-        ]
-        shown = items[:12]
-        for c in shown:
-            lines.append(f"- `{c.answer_chunk_id}` — {c.excerpt}")
-        if len(items) > len(shown):
-            lines.append(f"- … e mais {len(items) - len(shown)} trecho(s) — ver `report.json`.")
-        return ReportSection("Afirmações sem Citação", "\n".join(lines))
-
-    def _render_potentially_unsourced(self) -> ReportSection | None:
-        chunks = self.report.potentially_unsourced_chunks
-        if not chunks:
-            return None
-        lines = [
-            "Chunks **citados** com várias frases em que só a última está diretamente ancorada pela "
-            "citação — as frases anteriores do mesmo parágrafo podem não estar cobertas pela fonte:",
-            "",
-        ]
-        for c in chunks:
-            lines.append(
-                f"- `{c.answer_chunk_id}` — {c.sentence_count} frases, cita {self._markers_for(c.cited_reference_ids)}"
-            )
-            lines.append(f"  - {c.excerpt}")
-        return ReportSection("Chunks Citados com Várias Afirmações", "\n".join(lines))
 
     def _render_examples(self) -> ReportSection:
         by_verdict: dict[AuditVerdict, list[AuditResult]] = {v: [] for v in AuditVerdict}
@@ -590,6 +555,15 @@ def render_chunk_table_markdown(
     skip_by_id = {s.answer_chunk_id: s for s in (skipped or [])}
     ref_by_id = {ref.id: ref for ref in references}
 
+    # marcador -> URL, para que a linha mostre o numero que o TRECHO cita e o
+    # link daquele numero. Usar `citation_markers[0]` da referencia exibia o
+    # primeiro numero sob o qual ela esta listada, que nem sempre e o citado.
+    url_by_marker = {
+        marker: (ref.normalized_url or ref.raw_url)
+        for ref in references
+        for marker in ref.citation_markers
+    }
+
     def _marker_of(ref: Reference) -> str:
         return ref.citation_markers[0] if ref.citation_markers else f"[{ref.id}]"
 
@@ -606,10 +580,14 @@ def render_chunk_table_markdown(
         else:
             verdict = "—"
 
-        cited_refs = [ref_by_id[rid] for rid in chunk.cited_reference_ids if rid in ref_by_id]
-        link_by_marker: dict[str, str] = {}
-        for ref in cited_refs:
-            link_by_marker.setdefault(_marker_of(ref), ref.normalized_url or ref.raw_url)
+        if chunk.cited_markers:
+            link_by_marker = {m: url_by_marker.get(m, "— sem entrada na lista") for m in chunk.cited_markers}
+        else:  # run anterior a `AnswerChunk.cited_markers`
+            link_by_marker = {}
+            for rid in chunk.cited_reference_ids:
+                ref = ref_by_id.get(rid)
+                if ref is not None:
+                    link_by_marker.setdefault(_marker_of(ref), ref.normalized_url or ref.raw_url)
         markers = sorted(link_by_marker, key=_marker_sort_key)
 
         citations = "".join(markers) if markers else "—"

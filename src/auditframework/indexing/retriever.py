@@ -48,7 +48,7 @@ class Retriever:
 
     def retrieve(self, chunk: AnswerChunk) -> CuratedDocument:
         if not chunk.cited_reference_ids:
-            return self._skipped(chunk, "Chunk nao cita nenhuma referencia.")
+            return self._skipped(chunk, "Marcador(es) de citacao do trecho nao tem entrada correspondente na lista de referencias.")
         allowed_ids = self.vector_store.embedding_ids_for_references(chunk.cited_reference_ids)
         if not allowed_ids:
             return self._skipped(
@@ -101,7 +101,7 @@ class Retriever:
         janela de rerank."""
         if not chunk.cited_reference_ids:
             return CuratedDocument(
-                answer_chunk_id=chunk.id, assembled_context="", skip_reason="Chunk nao cita nenhuma referencia."
+                answer_chunk_id=chunk.id, assembled_context="", skip_reason="Marcador(es) de citacao do trecho nao tem entrada correspondente na lista de referencias."
             )
         allowed_ids = self.vector_store.embedding_ids_for_references(chunk.cited_reference_ids)
         if not allowed_ids:

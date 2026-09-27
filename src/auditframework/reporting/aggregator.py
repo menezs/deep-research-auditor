@@ -9,10 +9,8 @@ from ..models import (
     AuditVerdict,
     CitationIssue,
     JudgeConfig,
-    PotentiallyUnsourcedChunk,
     Reference,
     SourceInfo,
-    UncitedClaimChunk,
     ReferenceStats,
     ReferenceStatus,
     Report,
@@ -22,7 +20,6 @@ from ..models import (
 from ..common.pricing import is_cost_tracked
 from .cost_tracker import summarize_cost
 
-_MULTI_CLAIM_SENTENCE_THRESHOLD = 3
 
 _VERDICT_PCT_FIELDS: dict[AuditVerdict, str] = {
     AuditVerdict.SUPPORTED: "pct_supported",
@@ -182,40 +179,6 @@ def build_reference_stats(
     return stats
 
 
-def _multi_claim_chunks(chunks: list[AnswerChunk]) -> list[PotentiallyUnsourcedChunk]:
-    out: list[PotentiallyUnsourcedChunk] = []
-    for chunk in chunks:
-        if not chunk.cited_reference_ids:
-            continue
-        if chunk.sentence_count < _MULTI_CLAIM_SENTENCE_THRESHOLD:
-            continue
-        excerpt = " ".join(chunk.text.split())
-        out.append(
-            PotentiallyUnsourcedChunk(
-                answer_chunk_id=chunk.id,
-                sentence_count=chunk.sentence_count,
-                cited_reference_ids=list(chunk.cited_reference_ids),
-                excerpt=excerpt if len(excerpt) <= 300 else excerpt[:299].rstrip() + "…",
-            )
-        )
-    return out
-
-
-def _uncited_claims(chunks: list[AnswerChunk]) -> list[UncitedClaimChunk]:
-    out: list[UncitedClaimChunk] = []
-    for chunk in chunks:
-        if not chunk.is_uncited_claim:
-            continue
-        excerpt = " ".join(chunk.text.split())
-        out.append(
-            UncitedClaimChunk(
-                answer_chunk_id=chunk.id,
-                excerpt=excerpt if len(excerpt) <= 300 else excerpt[:299].rstrip() + "…",
-            )
-        )
-    return out
-
-
 def _trim(text: str, limit: int) -> str:
     text = " ".join((text or "").split())
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
@@ -233,6 +196,14 @@ def _citation_issues(
     def to_markers(ids: list[str]) -> str:
         return " ".join(markers.get(i, i) for i in ids)
 
+    def cited_by(chunk: AnswerChunk) -> str:
+        """O que o TRECHO cita — os marcadores dele, nao todos os numeros
+        sob os quais a referencia esta listada (uma URL listada como `[8]` e
+        `[10]` fazia a coluna mostrar os dois para um trecho que cita um
+        so). Runs anteriores a `cited_markers` caem no comportamento
+        antigo."""
+        return to_markers(chunk.cited_reference_ids) if not chunk.cited_markers else " ".join(chunk.cited_markers)
+
     out: list[CitationIssue] = []
     for result in results:
         if result.verdict != AuditVerdict.UNSUPPORTED:
@@ -247,7 +218,7 @@ def _citation_issues(
                 answer_chunk_id=chunk.id,
                 position=chunk.position,
                 claim_excerpt=_trim(chunk.text, 200),
-                cited_markers=to_markers(chunk.cited_reference_ids) or "(nenhuma)",
+                cited_markers=cited_by(chunk) or "(nenhuma)",
                 corroborating_markers=to_markers(result.corroborated_by_other_reference),
                 contradicting_markers=to_markers(result.contradicted_by_other_reference),
             )
@@ -260,8 +231,8 @@ def _skipped_reason_counts(skipped: list[SkippedChunk]) -> dict[str, int]:
     counts: Counter[str] = Counter()
     for chunk in skipped:
         reason = chunk.reason.lower()
-        if "nao cita nenhuma referencia" in reason or "não cita nenhuma referência" in reason:
-            counts["sem_citacao"] += 1
+        if "nao tem entrada correspondente" in reason or "não tem entrada correspondente" in reason:
+            counts["citacao_sem_entrada"] += 1
         elif "conteudo indexado" in reason or "conteúdo indexado" in reason:
             counts["ref_sem_conteudo"] += 1
         else:
@@ -292,7 +263,13 @@ def aggregate_report(
     counts = _verdict_counts(results)
     verification = _verification_summary(results)
     cost = summarize_cost(results)
-    skipped = skipped or []
+    # Registro de "pulado" cujo chunk nao existe mais nao pode entrar na
+    # conta: `answer_chunks.json` de uma run antiga tinha trechos sem
+    # citacao, e o `skipped_chunks.jsonl` ao lado guardou um registro para
+    # cada um. Somar esses orfaos faria SUPPORTED+UNSUPPORTED+SKIPPED passar
+    # de `total_chunks` e os percentuais nao fechariam 100%.
+    chunk_ids = {chunk.id for chunk in chunks}
+    skipped = [s for s in (skipped or []) if s.answer_chunk_id in chunk_ids]
     cost_tracked = (
         is_cost_tracked(judge_config.provider, judge_config.model) if judge_config is not None else True
     )
@@ -310,9 +287,6 @@ def aggregate_report(
         and s.partial_citations == 0
         and s.not_audited_positions == []
     )
-
-    uncited_claims = _uncited_claims(chunks)
-    claim_chunks = sum(1 for c in chunks if c.cited_reference_ids or c.is_uncited_claim)
 
     return Report(
         run_id=run_id,
@@ -342,10 +316,6 @@ def aggregate_report(
         inaccessible_references=[r for r in references if r.status == ReferenceStatus.INACCESSIBLE],
         skipped_chunks=skipped,
         reference_stats=reference_stats,
-        potentially_unsourced_chunks=_multi_claim_chunks(chunks),
-        uncited_claims=uncited_claims,
-        count_uncited_claims=len(uncited_claims),
-        count_claim_chunks=claim_chunks,
         citation_issues=_citation_issues(chunks, references, results),
         total_cost_usd=cost.total_cost_usd,
         total_tokens=cost.total_tokens,

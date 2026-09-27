@@ -49,24 +49,6 @@ class ReferenceStats(BaseModel):
     `key_excerpt` foi apresentado como evidencia."""
 
 
-class PotentiallyUnsourcedChunk(BaseModel):
-    """Chunk com varias frases em que so a ultima esta ancorada por uma
-    citacao — as frases anteriores podem carregar afirmacoes sem fonte."""
-
-    answer_chunk_id: str
-    sentence_count: int
-    cited_reference_ids: list[str] = Field(default_factory=list)
-    excerpt: str
-
-
-class UncitedClaimChunk(BaseModel):
-    """Paragrafo que faz afirmacao factual e nao tem nenhuma citacao no
-    documento (`AnswerChunk.is_uncited_claim`)."""
-
-    answer_chunk_id: str
-    excerpt: str
-
-
 class CitationIssue(BaseModel):
     """Trecho `UNSUPPORTED` pela fonte citada, mas cuja afirmacao aparece
     (ou e contradita) em OUTRA referencia baixada — deteccao da Etapa C
@@ -103,6 +85,12 @@ class SourceInfo(BaseModel):
     citation_markers_distinct: int = 0
     references_listed: int = 0
     references_never_cited: int = 0
+    exporter_artifacts: int = 0
+    """Entradas da lista de fontes marcadas como artefato do exportador de
+    PDF (guia de formatacao de citacao, documentacao da propria ferramenta).
+    Ficam gravadas em `references.json` mas nao sao baixadas nem auditadas —
+    este numero existe para que a exclusao seja visivel e conferivel, e
+    porque a quantidade de lixo que o exportador injeta e um achado."""
 
 
 class ToolStats(BaseModel):
@@ -150,12 +138,8 @@ class Report(BaseModel):
     """SUPPORTED com aspectos da afirmacao nao cobertos pela evidencia
     (`AuditResult.unsupported_aspects` nao vazio)."""
     skipped_reason_counts: dict[str, int] = Field(default_factory=dict)
-    """Chunks SKIPPED agrupados por motivo (`sem_citacao` / `ref_sem_conteudo`)."""
-    count_uncited_claims: int = 0
-    """Trechos com afirmacao factual e nenhuma citacao no documento."""
-    count_claim_chunks: int = 0
-    """Trechos que carregam afirmacao (citados + sem citacao) — denominador
-    de `count_uncited_claims`."""
+    """Chunks SKIPPED agrupados por motivo (`citacao_sem_entrada` /
+    `ref_sem_conteudo`)."""
 
     # --- Cascata de verificacao de vereditos UNSUPPORTED ---
     verification_ran: bool = False
@@ -179,8 +163,6 @@ class Report(BaseModel):
     inaccessible_references: list[Reference] = Field(default_factory=list)
     skipped_chunks: list[SkippedChunk] = Field(default_factory=list)
     reference_stats: list[ReferenceStats] = Field(default_factory=list)
-    potentially_unsourced_chunks: list[PotentiallyUnsourcedChunk] = Field(default_factory=list)
-    uncited_claims: list[UncitedClaimChunk] = Field(default_factory=list)
     citation_issues: list[CitationIssue] = Field(default_factory=list)
     """Detalhe da linha "provável erro de citação" da seção de verificação:
     um item por chunk UNSUPPORTED corroborado/contradito por outra fonte."""

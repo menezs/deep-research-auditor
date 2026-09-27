@@ -605,48 +605,38 @@ class TestCitationLevelAndUnsourced:
         )
         assert report.count_partially_supported == 1
         markdown = render_markdown(report, chunks=chunks, results=results)
-        assert "parcialmente suportada" in markdown
+        assert "1 dos 2 SUPPORTED são parciais" in markdown
+        assert "contados dentro** dos 2" in markdown
         assert "Não coberto pela evidência: a data exata não consta" in markdown
 
-    def test_potentially_unsourced_section_lists_multi_sentence_chunks(self):
-        long_chunk = AnswerChunk(
-            id="c1", answer_id="a1", position=0,
-            text="Afirmação um. Afirmação dois. Afirmação três citada.",
-            cited_reference_ids=["r1"], sentence_count=3,
-        )
-        report = aggregate_report(
-            run_id="run-1", answer_id="a1", tool_name="ChatGPT",
-            chunks=[long_chunk], references=[_reference("r1")],
-            results=[_result("c1", AuditVerdict.SUPPORTED)],
-        )
-        assert [c.answer_chunk_id for c in report.potentially_unsourced_chunks] == ["c1"]
-        markdown = render_markdown(report)
-        assert "## " in markdown and "Chunks Citados com Várias Afirmações" in markdown
-        assert "3 frases" in markdown
-
-    def test_uncited_claim_section_lists_paragraphs_without_any_citation(self):
-        chunks = [
-            AnswerChunk(
-                id="c0", answer_id="a1", position=0,
-                text="A empresa investiu pesado em pesquisa e desenvolvimento ao longo da década.",
-                cited_reference_ids=[], is_uncited_claim=True,
-            ),
-            AnswerChunk(
-                id="c1", answer_id="a1", position=1,
-                text="Hoje é líder de mercado.", cited_reference_ids=["r1"],
-            ),
-        ]
+    def test_skip_record_of_a_chunk_that_no_longer_exists_is_ignored(self):
+        """Run antiga: `skipped_chunks.jsonl` tem um registro por trecho sem
+        citação, que hoje não é mais carregado. Somar esses órfãos faria os
+        percentuais passarem de 100%."""
+        chunks = [_chunk("c1", ["r1"])]
         report = aggregate_report(
             run_id="run-1", answer_id="a1", tool_name="ChatGPT",
             chunks=chunks, references=[_reference("r1")],
             results=[_result("c1", AuditVerdict.SUPPORTED)],
+            skipped=[SkippedChunk(answer_chunk_id="c-antigo", reason="Chunk nao cita nenhuma referencia.")],
         )
-        assert report.count_uncited_claims == 1
-        assert report.count_claim_chunks == 2
-        assert [c.answer_chunk_id for c in report.uncited_claims] == ["c0"]
+        assert report.count_skipped == 0
+        assert report.skipped_reason_counts == {}
+        assert report.pct_supported == 100.0
+
+    def test_chunks_without_a_citation_never_reach_the_report(self):
+        """Trecho sem citação não é contabilizado em lugar nenhum: o
+        denominador dos percentuais é o total de afirmações citadas."""
+        chunks = [_chunk("c1", ["r1"]), _chunk("c2", ["r1"])]
+        report = aggregate_report(
+            run_id="run-1", answer_id="a1", tool_name="ChatGPT",
+            chunks=chunks, references=[_reference("r1")],
+            results=[_result("c1", AuditVerdict.SUPPORTED), _result("c2", AuditVerdict.UNSUPPORTED)],
+        )
+        assert report.total_chunks == 2
+        assert report.pct_supported == 50.0 and report.pct_unsupported == 50.0
         markdown = render_markdown(report)
-        assert "Afirmações sem Citação" in markdown
-        assert "1 de 2" in markdown
+        assert "Afirmações sem Citação" not in markdown
 
     def test_content_verification_table_has_one_row_per_cited_source(self):
         from auditframework.models import ReferenceVerdict
@@ -711,16 +701,20 @@ class TestCitationLevelAndUnsourced:
     def test_skipped_reasons_are_grouped(self):
         chunks = [_chunk("c1", []), _chunk("c2", ["r1"])]
         skipped = [
-            SkippedChunk(answer_chunk_id="c1", reason="Chunk nao cita nenhuma referencia."),
+            SkippedChunk(
+                answer_chunk_id="c1",
+                reason="Marcador(es) de citacao do trecho nao tem entrada correspondente na lista de referencias.",
+            ),
             SkippedChunk(answer_chunk_id="c2", reason="Referencia(s) citada(s) ['r1'] nao possui(em) conteudo indexado."),
         ]
         report = aggregate_report(
             run_id="run-1", answer_id="a1", tool_name="ChatGPT",
             chunks=chunks, references=[_reference("r1")], results=[], skipped=skipped,
         )
-        assert report.skipped_reason_counts == {"sem_citacao": 1, "ref_sem_conteudo": 1}
+        assert report.skipped_reason_counts == {"citacao_sem_entrada": 1, "ref_sem_conteudo": 1}
         markdown = render_markdown(report)
-        assert "Motivos:" in markdown and "não citam nenhuma referência" in markdown
+        assert "Motivos:" in markdown
+        assert "não existe na lista de referências" in markdown
 
 
 class TestChunkTableMarkdown:

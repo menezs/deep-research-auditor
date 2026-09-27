@@ -2,7 +2,11 @@ from pathlib import Path
 
 import pytest
 
-from auditframework.extraction.reference_extractor import extract_references
+from auditframework.extraction.reference_extractor import (
+    extract_references,
+    find_reference_section,
+)
+from auditframework.pipeline import _strip_reference_section
 
 FIXTURE = Path(__file__).parent.parent / "fixtures" / "sample_answer_full.md"
 
@@ -427,3 +431,419 @@ class TestHeadingTitledPairsFormat:
         text = "Corpo qualquer sem nenhuma lista de fontes.\n"
         refs = extract_references(text, source_answer_id="a1", tool_name="Gemini")
         assert refs == []
+
+
+class TestUrlWithParentheses:
+    """URLs reais contêm parênteses (PII do Lancet, desambiguação da
+    Wikipedia). Truncá-las fazia cada uma virar uma "obra" falsamente
+    exclusiva na análise de interseção entre execuções."""
+
+    def test_lancet_pii_parentheses_are_preserved(self):
+        url = "https://www.thelancet.com/journals/lancet/article/PIIS0140-6736(21)02178-4/fulltext"
+        refs = extract_references(f"[1] Estudo\n{url}\n", source_answer_id="a1", tool_name="Grok")
+        assert refs[0].raw_url == url
+
+    def test_wikipedia_disambiguation_parentheses_are_preserved(self):
+        url = "https://en.wikipedia.org/wiki/Mercury_(planet)"
+        refs = extract_references(f"[1] Verbete\n{url}\n", source_answer_id="a1", tool_name="Grok")
+        assert refs[0].raw_url == url
+
+    def test_closing_paren_from_surrounding_prose_is_dropped(self):
+        text = "[1] Titulo\n(ver https://example.com/artigo)\n"
+        refs = extract_references(text, source_answer_id="a1", tool_name="Grok")
+        assert refs[0].raw_url == "https://example.com/artigo"
+
+    def test_trailing_period_and_paren_are_both_dropped(self):
+        text = "[1] Titulo\n(fonte: https://example.com/artigo).\n"
+        refs = extract_references(text, source_answer_id="a1", tool_name="Grok")
+        assert refs[0].raw_url == "https://example.com/artigo"
+
+    def test_markdown_link_closing_paren_is_not_part_of_the_url(self):
+        text = "[1] [Título do artigo](https://example.com/artigo)\n"
+        refs = extract_references(text, source_answer_id="a1", tool_name="Grok")
+        assert refs[0].raw_url == "https://example.com/artigo"
+
+
+class TestExporterContamination:
+    """PDFs do Perplexity trazem, junto da lista real, dezenas de entradas
+    sobre COMO citar — guias de formatação e documentação da ferramenta. Não
+    são fontes do conteúdo, então ficam MARCADAS (não removidas): apagar
+    tornava a exclusão inauditável, e os padrões são genéricos o bastante
+    para poderem errar num relatório cujo tema seja citação."""
+
+    def test_citation_style_guide_is_marked_not_removed(self):
+        text = (
+            "[1] Fonte real\nhttps://example.com/real\n"
+            "[2] Como citar\nhttps://www.scribbr.com/citing-sources/numbered_citation_style\n"
+        )
+        refs = extract_references(text, source_answer_id="a1", tool_name="Perplexity")
+        by_url = {r.raw_url: r for r in refs}
+        assert len(by_url) == 2  # as duas continuam registradas
+        assert by_url["https://example.com/real"].exporter_artifact is False
+        assert by_url["https://www.scribbr.com/citing-sources/numbered_citation_style"].exporter_artifact is True
+
+    def test_tool_documentation_is_marked(self):
+        text = "[1] Doc\nhttps://docs.perplexity.ai/guides/rag-citations\n"
+        refs = extract_references(text, source_answer_id="a1", tool_name="Perplexity")
+        assert len(refs) == 1 and refs[0].exporter_artifact is True
+
+    def test_legitimate_reference_is_untouched(self):
+        text = "[1] Artigo\nhttps://www.nature.com/articles/s41562-025-02259-6\n"
+        refs = extract_references(text, source_answer_id="a1", tool_name="Perplexity")
+        assert len(refs) == 1 and refs[0].exporter_artifact is False
+
+    def test_artifact_never_steals_a_marker_from_a_real_source(self):
+        """O artefato não tem posição fixa: pode vir ANTES da fonte real que
+        usa o mesmo número. Quem resolve `[3]` tem de ser a fonte real."""
+        text = (
+            "[3] Guia\nhttps://www.scribbr.com/citing-sources/numbered_citation_style\n"
+            "[3] Fonte real\nhttps://example.com/real\n"
+        )
+        refs = extract_references(text, source_answer_id="a1", tool_name="Perplexity")
+        by_url = {r.raw_url: r for r in refs}
+        assert by_url["https://example.com/real"].citation_markers == ["[3]"]
+        assert by_url["https://www.scribbr.com/citing-sources/numbered_citation_style"].citation_markers == []
+
+
+class TestWorkKey:
+    """`work_key` responde "é o mesmo documento?"; `normalized_url`
+    responde "é a mesma página?". As duas colunas precisam coexistir."""
+
+    def test_pubmed_id_becomes_the_work_key(self):
+        refs = extract_references(
+            "[1] Lei 2020\nhttps://pubmed.ncbi.nlm.nih.gov/32997908/\n",
+            source_answer_id="a1", tool_name="Manus",
+        )
+        assert refs[0].work_key == "PMID:32997908"
+
+    def test_nature_article_maps_to_its_doi(self):
+        refs = extract_references(
+            "[1] Estudo\nhttps://www.nature.com/articles/s41562-025-02259-6\n",
+            source_answer_id="a1", tool_name="Grok",
+        )
+        assert refs[0].work_key == "DOI:10.1038/s41562-025-02259-6"
+
+    def test_same_work_under_two_urls_shares_the_work_key(self):
+        text = (
+            "[1] Versao PMC\nhttps://pmc.ncbi.nlm.nih.gov/articles/PMC8486335/\n"
+            "[2] Mesma obra\nhttps://www.ncbi.nlm.nih.gov/pmc/articles/PMC8486335/\n"
+        )
+        refs = extract_references(text, source_answer_id="a1", tool_name="Grok")
+        assert {r.work_key for r in refs} == {"PMC:PMC8486335"}
+
+    def test_urls_of_the_same_work_are_not_deduplicated(self):
+        """A verificação de trecho depende do endereço acessado — o PubMed
+        expõe só o resumo, o site do periódico o texto inteiro."""
+        text = (
+            "[1] Abstract\nhttps://pubmed.ncbi.nlm.nih.gov/32997908/\n"
+            "[2] Texto completo\nhttps://doi.org/10.1056/NEJMoa1917338\n"
+        )
+        refs = extract_references(text, source_answer_id="a1", tool_name="Manus")
+        assert len(refs) == 2
+
+
+class TestReferenceSectionBacktrack:
+    """Perplexity emite duas listas: uma ancorada pelo cabeçalho e outra,
+    numerada, depois do `⁂`. Ancorar só na última deixava a primeira no
+    corpo — cada entrada dela virava um "chunk" a julgar, e suas fontes
+    desapareciam da lista de referências."""
+
+    def test_backtracks_to_the_earlier_anchor_when_everything_between_is_a_source_list(self):
+        text = (
+            "## Referências\n\n"
+            "1. <u>https://example.com/a</u>\n"
+            "2. <u>https://example.com/b</u>\n\n"
+            "⁂ \n\n"
+            "3. <u>https://example.com/c</u>\n"
+        )
+        refs = extract_references(text, source_answer_id="a1", tool_name="Perplexity")
+        assert {r.raw_url for r in refs} == {
+            "https://example.com/a",
+            "https://example.com/b",
+            "https://example.com/c",
+        }
+
+    def test_body_and_reference_list_are_complementary(self):
+        """O corte usado pelo chunker é a MESMA âncora usada pela extração —
+        nenhuma entrada da lista pode sobrar no corpo."""
+        text = (
+            "Uma afirmação qualquer do corpo. [1]\n\n"
+            "## Referências\n\n"
+            "1. <u>https://example.com/a</u>\n\n"
+            "⁂ \n\n"
+            "2. <u>https://example.com/b</u>\n"
+        )
+        body = _strip_reference_section(text)
+        assert body == "Uma afirmação qualquer do corpo. [1]"
+        assert "example.com" not in body
+
+    def test_prose_list_before_the_anchor_still_blocks_the_backtrack(self):
+        """Contraprova: uma lista numerada de resumo (sem URL) tem a mesma
+        forma de uma lista de fontes — não pode arrastar o corpo para dentro
+        da seção de referências."""
+        text = (
+            "## Referências\n"
+            "1. **Fonte A** - resumo sem link\n"
+            "2. **Fonte B** - outro resumo\n\n"
+            "⁂ \n\n"
+            "1. <u>https://example.com/real</u>\n"
+        )
+        anchor = find_reference_section(text)
+        assert text[anchor[0]] == "⁂"
+
+
+class TestPrefixTruncatedUrlRepair:
+    def test_last_path_segment_lost_at_a_line_break_is_restored(self, tmp_path):
+        """A URL extraída é prefixo exato de uma embutida no PDF: o último
+        segmento do path ficou na linha seguinte e se perdeu."""
+        pytest.importorskip("fitz")
+        pdf_path = tmp_path / "resposta.pdf"
+        full = "https://example.com/businesses-and-occupations/samsung-electronics-co-ltd"
+        TestRepairUsingPdfLinks()._make_pdf(pdf_path, [full])
+
+        text = "[1] Titulo\nhttps://example.com/businesses-and-occupations/\n"
+        refs = extract_references(text, source_answer_id="a1", tool_name="Gemini", answer_path=pdf_path)
+
+        assert refs[0].raw_url == full
+
+    def test_two_extra_path_segments_are_a_different_page_not_a_repair(self, tmp_path):
+        pytest.importorskip("fitz")
+        pdf_path = tmp_path / "resposta.pdf"
+        TestRepairUsingPdfLinks()._make_pdf(pdf_path, ["https://example.com/a/b/c/d/e/f"])
+
+        text = "[1] Titulo\nhttps://example.com/a/\n"
+        refs = extract_references(text, source_answer_id="a1", tool_name="Gemini", answer_path=pdf_path)
+
+        assert refs[0].raw_url == "https://example.com/a/"
+
+    def test_browser_highlight_fragment_is_never_added_by_the_repair(self, tmp_path):
+        pytest.importorskip("fitz")
+        pdf_path = tmp_path / "resposta.pdf"
+        TestRepairUsingPdfLinks()._make_pdf(pdf_path, ["https://example.com/artigo#:~:text=trecho%20destacado"])
+
+        text = "[1] Titulo\nhttps://example.com/artigo\n"
+        refs = extract_references(text, source_answer_id="a1", tool_name="Gemini", answer_path=pdf_path)
+
+        assert refs[0].raw_url == "https://example.com/artigo"
+
+
+class TestMarkerCollisionBetweenTwoLists:
+    """Uma resposta do Perplexity traz duas listas de fontes, ambas
+    numeradas a partir de 1 — `[3]` acabava apontando para duas
+    referências, e o relatório ficava autocontraditório ("cita [3],
+    corroborado por [3]")."""
+
+    def test_repeated_marker_stays_with_the_first_reference_in_document_order(self):
+        text = (
+            "## References\n\n"
+            "1. <u>https://example.com/real-um</u>\n"
+            "3. <u>https://example.com/real-tres</u>\n\n"
+            "⁂ \n\n"
+            "3. <u>https://example.com/segunda-lista</u>\n"
+        )
+        refs = extract_references(text, source_answer_id="a1", tool_name="Perplexity")
+        by_marker = {m: r for r in refs for m in r.citation_markers}
+        assert by_marker["[3]"].raw_url == "https://example.com/real-tres"
+
+    def test_reference_that_lost_its_marker_is_still_listed(self):
+        """Ela continua na lista (aparece como "listada mas nunca citada") —
+        o que se pode afirmar é que o marcador não é dela, não que a fonte
+        não existe."""
+        text = (
+            "## References\n\n1. <u>https://example.com/primeira</u>\n\n"
+            "⁂ \n\n1. <u>https://example.com/segunda</u>\n"
+        )
+        refs = extract_references(text, source_answer_id="a1", tool_name="Perplexity")
+        urls = {r.raw_url for r in refs}
+        assert urls == {"https://example.com/primeira", "https://example.com/segunda"}
+        segunda = next(r for r in refs if r.raw_url.endswith("segunda"))
+        assert segunda.citation_markers == []
+
+
+class TestWritingGuideContamination:
+    def test_author_guidelines_page_is_marked(self):
+        text = (
+            "[1] Fonte real\nhttps://example.com/real\n"
+            "[2] Guia\nhttps://www.asme.org/publications-submissions/proceedings/author-guidelines/elements-of-a-paper\n"
+        )
+        refs = extract_references(text, source_answer_id="a1", tool_name="Perplexity")
+        marked = [r.raw_url for r in refs if r.exporter_artifact]
+        assert marked == [
+            "https://www.asme.org/publications-submissions/proceedings/author-guidelines/elements-of-a-paper"
+        ]
+
+
+class TestTwoSourceListsPriority:
+    """O Perplexity emite duas listas: uma sob `## References`, cuja
+    numeração é a que o corpo cita, e outra depois do `⁂`, que reenumera
+    todas as fontes consultadas de 1 a N. A mesma URL nas duas fazia a
+    referência acumular os dois números."""
+
+    def test_url_in_both_lists_keeps_the_references_number(self):
+        text = (
+            "## References\n\n"
+            "1. <u>https://example.com/artigo</u>\n\n"
+            "⁂ \n\n"
+            "26. <u>https://example.com/artigo</u>\n"
+        )
+        refs = extract_references(text, source_answer_id="a1", tool_name="Perplexity")
+        assert len(refs) == 1
+        assert refs[0].citation_markers == ["[1]"]
+
+    def test_url_only_in_the_asterism_list_keeps_its_own_number(self):
+        text = (
+            "## References\n\n"
+            "1. <u>https://example.com/citada</u>\n\n"
+            "⁂ \n\n"
+            "27. <u>https://example.com/so-na-segunda</u>\n"
+        )
+        refs = extract_references(text, source_answer_id="a1", tool_name="Perplexity")
+        by_url = {r.raw_url: r.citation_markers for r in refs}
+        assert by_url["https://example.com/so-na-segunda"] == ["[27]"]
+
+    def test_two_numbers_in_the_same_list_are_both_kept(self):
+        """Caso legítimo: a lista repete a mesma URL sob dois números e o
+        corpo pode citar qualquer um dos dois."""
+        text = (
+            "## References\n\n"
+            "8. <u>https://example.com/artigo</u>\n"
+            "10. <u>https://example.com/artigo</u>\n"
+        )
+        refs = extract_references(text, source_answer_id="a1", tool_name="Perplexity")
+        assert len(refs) == 1
+        assert refs[0].citation_markers == ["[8]", "[10]"]
+
+    def test_single_list_is_unaffected(self):
+        text = "⁂ \n\n1. <u>https://example.com/a</u>\n2. <u>https://example.com/a</u>\n"
+        refs = extract_references(text, source_answer_id="a1", tool_name="Perplexity")
+        assert refs[0].citation_markers == ["[1]", "[2]"]
+
+
+class TestMidSegmentTruncationRepair:
+    def test_url_cut_in_the_middle_of_a_segment_is_restored(self, tmp_path):
+        pytest.importorskip("fitz")
+        pdf_path = tmp_path / "resposta.pdf"
+        full = "https://example.com/esrc/making-the-case-for-a-four-day-working-week/"
+        TestRepairUsingPdfLinks()._make_pdf(pdf_path, [full])
+
+        text = "[1] Titulo\nhttps://example.com/esrc/making-the-case-for-a-four\n"
+        refs = extract_references(text, source_answer_id="a1", tool_name="Perplexity", answer_path=pdf_path)
+
+        assert refs[0].raw_url == full
+
+    def test_ambiguous_prefix_is_not_repaired(self, tmp_path):
+        """Dois hyperlinks começam com a URL extraída: não há como saber qual
+        é a truncada, então nada é reparado. Os sufixos são longos de
+        propósito, para ficarem fora do orçamento da regra de ligadura e o
+        caso chegar de fato na regra de prefixo."""
+        pytest.importorskip("fitz")
+        pdf_path = tmp_path / "resposta.pdf"
+        TestRepairUsingPdfLinks()._make_pdf(
+            pdf_path,
+            [
+                "https://example.com/artigo-sobre-jornada-de-trabalho",
+                "https://example.com/artigo-sobre-salario-minimo",
+            ],
+        )
+
+        text = "[1] Titulo\nhttps://example.com/artigo\n"
+        refs = extract_references(text, source_answer_id="a1", tool_name="Perplexity", answer_path=pdf_path)
+
+        assert refs[0].raw_url == "https://example.com/artigo"
+
+    def test_bare_host_is_never_repaired_into_a_page(self, tmp_path):
+        pytest.importorskip("fitz")
+        pdf_path = tmp_path / "resposta.pdf"
+        TestRepairUsingPdfLinks()._make_pdf(pdf_path, ["https://example.com/alguma-pagina"])
+
+        text = "[1] Titulo\nhttps://example.com/\n"
+        refs = extract_references(text, source_answer_id="a1", tool_name="Perplexity", answer_path=pdf_path)
+
+        assert refs[0].raw_url == "https://example.com/"
+
+
+class TestPriorityAfterPdfLinkRepair:
+    """As duas listas citam a mesma fonte, e o conversor corrompe cada
+    ocorrência de um jeito diferente — elas só ficam idênticas DEPOIS do
+    reparo pelos hyperlinks do PDF, passando longe da deduplicação por URL.
+    A prioridade tem de valer ali também."""
+
+    def test_cross_list_duplicate_keeps_the_primary_number(self, tmp_path):
+        pytest.importorskip("fitz")
+        pdf_path = tmp_path / "resposta.pdf"
+        full = "https://example.com/four-day-week-made-permanent-for-most-uk-firms-in-worlds-biggest-trial"
+        TestRepairUsingPdfLinks()._make_pdf(pdf_path, [full])
+
+        # "firmsin" na lista principal, "bigg est" na do ⁂: URLs distintas
+        # até o reparo, a mesma depois dele.
+        text = (
+            "## References\n\n"
+            "4. <u>https://example.com/four-day-week-made-permanent-for-most-uk-firmsin-worlds-biggest-trial</u>\n\n"
+            "⁂ \n\n"
+            "14. <u>https://example.com/four-day-week-made-permanent-for-most-uk-firms-in-worlds-bigg est-trial</u>\n"
+        )
+        refs = extract_references(text, source_answer_id="a1", tool_name="Perplexity", answer_path=pdf_path)
+
+        assert len(refs) == 1
+        assert refs[0].raw_url == full
+        assert refs[0].citation_markers == ["[4]"]
+
+    def test_same_list_duplicate_keeps_both_numbers(self, tmp_path):
+        """Contraprova: a MESMA lista repete a fonte sob dois números e o
+        corpo cita os dois — descartar um deixaria o trecho sem fonte."""
+        pytest.importorskip("fitz")
+        pdf_path = tmp_path / "resposta.pdf"
+        full = "https://example.com/assessing-the-operational-impact-of-a-four-day-week"
+        TestRepairUsingPdfLinks()._make_pdf(pdf_path, [full])
+
+        text = (
+            "## References\n\n"
+            "8. <u>https://example.com/assessing-the-operational-impact-of-a-fourday-week</u>\n"
+            "10. <u>https://example.com/assessing-the-operational-impact-of-a-four-day-we ek</u>\n"
+        )
+        refs = extract_references(text, source_answer_id="a1", tool_name="Perplexity", answer_path=pdf_path)
+
+        assert len(refs) == 1
+        assert refs[0].citation_markers == ["[8]", "[10]"]
+
+
+class TestRobustnessAcrossInputShapes:
+    """Requisito: nenhum arquivo de entrada pode provocar erro. Cada forma
+    degenerada abaixo já apareceu ou é plausível no corpus."""
+
+    SHAPES = {
+        "vazio": "",
+        "so_espaco": "   \n\n  \t ",
+        "so_cabecalho": "## Referências\n",
+        "so_asterismo": "⁂",
+        "asterismo_sem_url": "Corpo [1].\n\n⁂\n\nnada aqui\n",
+        "cabecalho_sem_url": "Corpo [1].\n\n## References\n\nsem link nenhum\n",
+        "marcador_sem_lista": "Uma afirmação citada [7].\n",
+        "lista_sem_marcador": "## References\n\nhttps://example.com/a\n",
+        "duas_listas_vazias": "## References\n\n⁂\n",
+        "host_nu": "## References\n\n1. <u>https://example.com</u>\n",
+        "marcador_zero": "Afirmação [0].\n\n## References\n\n0. <u>https://example.com/z</u>\n",
+        "numero_gigante": "Afirmação [999999].\n\n⁂\n\n999999. <u>https://example.com/g</u>\n",
+        "colchete_malformado": "Afirmação [ e outra ].\n\n## References\n\n1. <u>https://example.com/m</u>\n",
+        "url_sem_esquema": "## References\n\n1. <u>example.com/sem-esquema</u>\n",
+        "so_tabela": "|a|b|\n|---|---|\n|1|2|\n",
+        "asterismo_antes_do_corpo": "⁂\n\nCorpo [1].\n\n## References\n\n1. <u>https://example.com/a</u>\n",
+        "tres_listas": (
+            "## References\n\n1. <u>https://example.com/a</u>\n\n"
+            "⁂\n\n1. <u>https://example.com/b</u>\n\n"
+            "⁂\n\n1. <u>https://example.com/c</u>\n"
+        ),
+    }
+
+    @pytest.mark.parametrize("shape", sorted(SHAPES))
+    def test_extraction_and_chunking_never_raise(self, shape):
+        text = self.SHAPES[shape]
+        refs = extract_references(text, source_answer_id="a1", tool_name="Perplexity")
+        auditable = [r for r in refs if not r.exporter_artifact]
+
+        # invariante: um marcador nunca pertence a duas referências
+        owners: dict[str, str] = {}
+        for ref in auditable:
+            for marker in ref.citation_markers:
+                assert marker not in owners, f"{marker} reivindicado duas vezes em {shape!r}"
+                owners[marker] = ref.id

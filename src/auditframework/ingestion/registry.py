@@ -20,11 +20,19 @@ class ReferenceRegistry:
         self.documents_dir.mkdir(parents=True, exist_ok=True)
         self.references_path = run_dir / "references.json"
 
-    def load_references(self) -> list[Reference]:
+    def load_references(self, *, include_artifacts: bool = False) -> list[Reference]:
+        """Referencias da execucao. Por padrao OMITE as marcadas como
+        artefato do exportador (`Reference.exporter_artifact`) — elas ficam
+        gravadas para a exclusao ser auditavel, mas nao devem ser baixadas,
+        indexadas, julgadas nem entrar em metrica nenhuma. Quem precisa
+        contar quantas foram excluidas passa `include_artifacts=True`."""
         if not self.references_path.exists():
             return []
         raw = json.loads(self.references_path.read_text(encoding="utf-8"))
-        return [Reference.model_validate(item) for item in raw]
+        references = [Reference.model_validate(item) for item in raw]
+        if include_artifacts:
+            return references
+        return [ref for ref in references if not ref.exporter_artifact]
 
     def save_references(self, references: list[Reference]) -> None:
         payload = [json.loads(ref.model_dump_json()) for ref in references]

@@ -35,8 +35,12 @@ def build_source_info(
     info.citation_markers_distinct = len(set(markers))
 
     cited_ids = {rid for chunk in chunks for rid in chunk.cited_reference_ids}
-    info.references_listed = len(references)
-    info.references_never_cited = sum(1 for r in references if r.id not in cited_ids)
+    # Artefato do exportador nao e fonte: conta a parte, para nao inflar
+    # "listadas" nem afundar a taxa de uso das referencias.
+    auditable = [r for r in references if not r.exporter_artifact]
+    info.exporter_artifacts = len(references) - len(auditable)
+    info.references_listed = len(auditable)
+    info.references_never_cited = sum(1 for r in auditable if r.id not in cited_ids)
     return info
 
 

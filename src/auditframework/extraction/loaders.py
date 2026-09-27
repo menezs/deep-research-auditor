@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Protocol
 
 from ..common.errors import ExtractionError
+from .reflow import reflow_markdown
 
 _HEADING_STYLE_RE = re.compile(r"^heading\s*(\d)$", re.IGNORECASE)
 
@@ -88,7 +89,7 @@ class PdfAnswerLoader:
     def load(self, path: Path) -> str:
         import pymupdf4llm
 
-        return pymupdf4llm.to_markdown(str(path))
+        return reflow_markdown(pymupdf4llm.to_markdown(str(path)))
 
 
 class DocxAnswerLoader:

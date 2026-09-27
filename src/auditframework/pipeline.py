@@ -15,10 +15,9 @@ from .common.errors import ConfigurationError, LLMParseError
 from .config import Settings
 from .extraction.loaders import load_answer
 from .extraction.reference_extractor import (
-    _ASTERISM,
-    _REFERENCE_SECTION_HEADING,
     ReferenceExtractionStrategy,
     extract_references,
+    find_reference_section,
 )
 from .common.llm_client import LLMClient, create_llm_client
 from .common.pricing import is_cost_tracked
@@ -57,18 +56,13 @@ def _strip_reference_section(text: str) -> str:
     sao apenas citacoes (visto no Perplexity, que ancora a lista so pelo
     separador `⁂`, sem cabecalho).
 
-    Corta a partir da ultima ancora encontrada — cabecalho de secao
-    (`Referencias`/`References`/...) ou o separador `⁂` do Perplexity."""
-    cut_points: list[int] = []
-    heading_match = _REFERENCE_SECTION_HEADING.search(text)
-    if heading_match is not None:
-        cut_points.append(heading_match.start())
-    asterism_pos = text.rfind(_ASTERISM)
-    if asterism_pos != -1:
-        cut_points.append(asterism_pos)
-    if not cut_points:
-        return text
-    return text[: max(cut_points)].rstrip()
+    Usa a MESMA ancora que a extracao de referencias
+    (`find_reference_section`), para que o corpo e a lista sejam
+    exatamente complementares — antes cada lado decidia o corte por conta
+    propria (um pegava o primeiro `⁂`, o outro o ultimo) e um trecho podia
+    cair nos dois ou em nenhum."""
+    anchor = find_reference_section(text)
+    return text if anchor is None else text[: anchor[0]].rstrip()
 
 
 class PipelineStage(Protocol):
@@ -160,8 +154,17 @@ def _save_answer_chunks(run_dir: Path, chunks: list[AnswerChunk]) -> None:
 
 
 def _load_answer_chunks(run_dir: Path) -> list[AnswerChunk]:
+    """Descarta os chunks sem citacao que runs ANTIGAS gravaram com
+    `is_uncited_claim: true` — o `AnswerChunker` nao os produz mais. Sem
+    isso, `audit resume`/`audit report` de uma run velha continuaria
+    contando trechos que nunca foram julgados (todos viravam SKIPPED),
+    inflando o total e o percentual de pulados em relacao a uma run nova.
+
+    O filtro olha so esse campo, que nenhuma run nova escreve: um chunk
+    atual com `cited_reference_ids` vazio (marcador sem entrada na lista de
+    referencias) continua carregado, porque tem citacao de fato."""
     raw = json.loads((run_dir / "answer_chunks.json").read_text(encoding="utf-8"))
-    return [AnswerChunk.model_validate(item) for item in raw]
+    return [AnswerChunk.model_validate(item) for item in raw if not item.get("is_uncited_claim")]
 
 
 def _save_source_info(run_dir: Path, source_info: SourceInfo) -> None:
@@ -217,12 +220,28 @@ class ExtractionStage:
             answer_path=ctx.answer_path,
         )
         ReferenceRegistry(ctx.run_dir).save_references(references)
-        logger.info("Extraidas %d referencias de %s", len(references), ctx.answer_path)
+        # `references` traz tambem as marcadas como artefato do exportador,
+        # que ficam gravadas para a exclusao ser conferivel mas nao devem
+        # resolver marcador nenhum nem ser auditadas.
+        auditable = [ref for ref in references if not ref.exporter_artifact]
+        logger.info(
+            "Extraidas %d referencias de %s (%d descartadas como artefato do exportador)",
+            len(auditable),
+            ctx.answer_path,
+            len(references) - len(auditable),
+        )
 
         body = _strip_reference_section(text)
-        chunks = AnswerChunker().chunk(body, answer_id=ctx.run_id, references=references)
+        chunks = AnswerChunker().chunk(body, answer_id=ctx.run_id, references=auditable)
         _save_answer_chunks(ctx.run_dir, chunks)
-        logger.info("Resposta dividida em %d chunks", len(chunks))
+        if not chunks:
+            logger.warning(
+                "Nenhuma afirmacao citada encontrada em %s: a resposta nao usa marcadores `[N]` no "
+                "corpo do texto (ou eles nao foram reconhecidos). Nao ha o que auditar.",
+                ctx.answer_path.name,
+            )
+        else:
+            logger.info("Resposta dividida em %d afirmacoes citadas", len(chunks))
 
         source_info = build_source_info(
             path=ctx.answer_path, body=body, references=references, chunks=chunks

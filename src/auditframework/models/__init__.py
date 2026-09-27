@@ -12,12 +12,10 @@ from .reference import Reference, ReferenceStatus
 from .report import (
     CitationIssue,
     JudgeConfig,
-    PotentiallyUnsourcedChunk,
     Report,
     ReferenceStats,
     SourceInfo,
     ToolStats,
-    UncitedClaimChunk,
 )
 
 __all__ = [
@@ -35,8 +33,6 @@ __all__ = [
     "ReferenceStatus",
     "Report",
     "JudgeConfig",
-    "PotentiallyUnsourcedChunk",
-    "UncitedClaimChunk",
     "CitationIssue",
     "ReferenceStats",
     "SourceInfo",

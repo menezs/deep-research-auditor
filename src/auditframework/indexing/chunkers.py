@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 
 from ..models import AnswerChunk, Reference, ReferenceChunk
+from .segmentation import sentence_boundaries
 
 _BRACKET_RE = re.compile(r"\[\s*(\d+)\s*\]")
 _SUP_RE = re.compile(r"<sup>\s*(\d+)\s*</sup>", re.IGNORECASE)
@@ -36,45 +37,14 @@ _TABLE_SEP_RE = re.compile(r"^[ \t]*\|[\s:|-]+\|[ \t]*$")
 _BR_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
 _LEADING_NOISE_RE = re.compile(r"^[\s.,;:!?)\]|–—-]+")
 
-# Fronteira de frase: `.`/`!`/`?` seguido de espaco + maiuscula (ASCII ou
-# Latin-1 acentuada) ou fim do texto. Evita contar `.` de numeros
-# (`1.338`, `v2.5`) como fim de frase.
-_SENTENCE_BOUNDARY_RE = re.compile(r'[.!?]+(?:\s+(?=[A-ZÀ-Þ"\'(])|\s*$)')
-
 # Wrappers de formatacao que o pymupdf4llm deixa ao redor de links e
 # marcadores de citacao (`<u>[1] [2]</u>`) — sem valor semantico.
-_TAG_ARTIFACT_RE = re.compile(r"</?(?:u|b|i|em|strong|span|mark)\s*>", re.IGNORECASE)
-_WORD_RE = re.compile(r"\w{2,}")
-_MIN_CLAIM_WORDS = 4
-
-
-def _count_sentences(text: str) -> int:
-    """Estimativa de frases num trecho — usada para sinalizar chunks em
-    que so a ultima frase esta ancorada por uma citacao."""
-    boundaries = len(_SENTENCE_BOUNDARY_RE.findall(text))
-    if not text.rstrip().endswith((".", "!", "?")):
-        boundaries += 1
-    return max(1, boundaries)
+_TAG_ARTIFACT_RE = re.compile(r"</?(?:u|b|i|em|strong|span|mark|sup|sub)\s*>", re.IGNORECASE)
+_HAS_ALNUM_RE = re.compile(r"[0-9A-Za-zÀ-ÿ]")
 
 
 def _strip_tag_artifacts(text: str) -> str:
     return _TAG_ARTIFACT_RE.sub("", text).strip()
-
-
-def _looks_like_claim(text: str) -> bool:
-    """Paragrafo que carrega afirmacao factual — separa prosa (que vale
-    sinalizar quando nao tem fonte) de cabecalhos, linhas de tabela,
-    titulos, URLs e fragmentos de frase quebrada."""
-    body = _HEADER_RE.sub("", _strip_tag_artifacts(text)).strip()
-    body = re.sub(r"^[-*\d.)\s\"'“]+|\*+", "", body).strip()  # bullet/numeracao/enfase inicial
-    if not body or (not body[0].isupper() and body[0] not in "\"'“("):
-        return False  # vazio ou continuacao de frase (comeca minusculo)
-    words = _WORD_RE.findall(body)
-    if len(words) < _MIN_CLAIM_WORDS:
-        return False
-    # prosa de verdade: termina em pontuacao final, ou e longa o bastante
-    # para nao ser um cabecalho/linha de tabela
-    return body.rstrip().endswith((".", "!", "?", "”", '"')) or len(words) >= 15
 
 
 def _split_paragraphs(text: str) -> list[str]:
@@ -102,9 +72,9 @@ def _linearize_row(row: str) -> str:
 def _linearize_markdown_tables(text: str) -> str:
     """Converte cada bloco de tabela markdown (>= 2 linhas `|...|`
     consecutivas) em uma frase por linha (`celula — celula.`), descartando
-    `|`, `<br>`, `**` e a linha `|---|`. Uma linha vira chunk so se tiver
-    marcador de citacao ou for longa o bastante para ser prosa — linhas de
-    cabecalho/rotulo (sem citacao, curtas) sao descartadas. Prosa fora de
+    `|`, `<br>`, `**` e a linha `|---|`. So sobrevive a linha que tem
+    marcador de citacao — linha de cabecalho/rotulo e linha de dado sem
+    fonte nao teriam destino nenhum (nao sao auditaveis). Prosa fora de
     tabela fica intocada."""
     lines = text.split("\n")
     out: list[str] = []
@@ -120,9 +90,10 @@ def _linearize_markdown_tables(text: str) -> str:
         for k in range(i, j):
             if _TABLE_SEP_RE.match(lines[k]):
                 continue
-            has_marker = _ROW_HAS_MARKER_RE.search(lines[k]) is not None
+            if not _ROW_HAS_MARKER_RE.search(lines[k]):
+                continue
             linear = _linearize_row(lines[k])
-            if not linear or (not has_marker and len(_WORD_RE.findall(linear)) < 20):
+            if not linear:
                 continue
             if not linear.rstrip().endswith((".", "!", "?", ":")):
                 linear += "."
@@ -184,22 +155,36 @@ def _resolve_markers(markers: list[str], marker_to_ref_id: dict[str, str]) -> li
 
 
 class AnswerChunker:
-    """Divide o texto da resposta em trechos delimitados por marcadores
-    de citacao, e resolve cada marcador para o `Reference.id` estavel
-    correspondente (nao mais a string bruta "[1]") — portado de
-    `syntex.ReferenceExtractor.extract_chunks_with_references`, com a
-    resolucao de referencia (via `Reference.citation_markers`) somada."""
+    """Divide o texto da resposta em trechos ancorados por marcadores de
+    citacao, e resolve cada marcador para o `Reference.id` estavel
+    correspondente (nao a string bruta "[1]").
+
+    Um marcador `[N]` ancora o texto que vai dele PARA TRAS ate a primeira
+    das tres fronteiras: fim do marcador anterior no mesmo paragrafo,
+    fronteira de sentenca real (ver `segmentation`), ou inicio do
+    paragrafo. Assim o trecho julgado fica restrito a afirmacao que aquela
+    citacao de fato sustenta.
+
+    A versao anterior fatiava so pelos vaos entre marcadores, quebrando
+    apenas em fronteira de PARAGRAFO: um paragrafo com tres frases e uma
+    citacao ao final virava um unico chunk com as tres, e o juiz recebia
+    afirmacoes extras que a fonte nunca foi citada para sustentar.
+
+    Texto SEM marcador nao vira chunk: a auditoria e sobre a relacao entre
+    uma afirmacao e a fonte que ela cita, e sem citacao nao existe essa
+    relacao para verificar. Isso tambem descarta o que nao e afirmacao
+    (cabecalho, rotulo de tabela, eco do proprio prompt, cauda de frase
+    cortada por um marcador anterior) sem precisar adivinhar quais desses
+    "parecem" uma afirmacao."""
 
     def chunk(self, text: str, *, answer_id: str, references: list[Reference]) -> list[AnswerChunk]:
         normalized = _normalize_citation_markers(_linearize_markdown_tables(text))
         marker_to_ref_id = _build_marker_index(references)
-        matches = list(_BRACKET_RE.finditer(normalized))
-
         chunks: list[AnswerChunk] = []
 
-        def emit(raw_text: str, ref_ids: list[str], *, has_marker: bool = False) -> None:
+        def emit(raw_text: str, markers: list[str], ref_ids: list[str]) -> None:
             body = _LEADING_NOISE_RE.sub("", _strip_tag_artifacts(raw_text)).strip()
-            if not body:
+            if not body or not _HAS_ALNUM_RE.search(body):
                 return
             pos = len(chunks)
             chunks.append(
@@ -208,51 +193,31 @@ class AnswerChunker:
                     answer_id=answer_id,
                     position=pos,
                     text=body,
+                    cited_markers=markers,
                     cited_reference_ids=ref_ids,
-                    sentence_count=_count_sentences(body),
-                    is_uncited_claim=not has_marker and not ref_ids and _looks_like_claim(body),
                 )
             )
 
-        if not matches:
-            stripped = normalized.strip()
-            for para in _split_paragraphs(stripped) or [stripped]:
-                emit(para, [])
-            return chunks
-
-        cursor = 0
-        for markers, run_start, run_end in _group_runs(matches, normalized):
-            raw_span = normalized[cursor:run_start]
-            cursor = run_end
-            span = raw_span.strip()
-            if not span:
+        for block in _split_paragraphs(normalized):
+            if _HEADER_RE.match(block):
                 continue
-            ref_ids = _resolve_markers(markers, marker_to_ref_id)
-            pieces = _split_paragraphs(span)
-            if len(pieces) == 1:
-                emit(span, ref_ids, has_marker=True)
+            runs = _group_runs(list(_BRACKET_RE.finditer(block)), block)
+            if not runs:
                 continue
-            # O marcador `[N]` sustenta o paragrafo em que aparece (o ultimo
-            # pedaco do vao). Se o vao NAO comeca com linha em branco, o
-            # primeiro pedaco e a cauda do paragrafo da citacao anterior —
-            # junta no ancorado. Os pedacos do meio sao paragrafos proprios
-            # sem citacao nenhuma -> "Afirmacoes sem Citacao".
-            anchored, lead = pieces[-1], pieces[:-1]
-            starts_fresh = re.match(r"\s*\n[ \t]*\n", raw_span) is not None
-            if not starts_fresh and lead:
-                anchored = lead[0] + "\n\n" + anchored
-                lead = lead[1:]
-            for para in lead:
-                if chunks and _looks_like_claim(para):
-                    emit(para, [])  # afirmacao propria, entre dois paragrafos citados
-                elif not _HEADER_RE.match(para):
-                    anchored = para + "\n\n" + anchored  # nao perde conteudo
-            emit(anchored, ref_ids, has_marker=True)
+            boundaries = sentence_boundaries(block)
+            previous_end = 0
+            for markers, run_start, run_end in runs:
+                # Uma fronteira so corta se sobra texto entre ela e o
+                # marcador: em "frase.[4]" o ponto encosta no marcador, e o
+                # `[4]` ancora a frase que acabou de terminar — nao um
+                # trecho vazio.
+                candidates = [
+                    b for b in boundaries if previous_end <= b <= run_start and block[b:run_start].strip()
+                ]
+                left = max(candidates) if candidates else previous_end
+                emit(block[left:run_start], markers, _resolve_markers(markers, marker_to_ref_id))
+                previous_end = run_end
 
-        trailing = normalized[cursor:].strip()
-        for para in _split_paragraphs(trailing):
-            if _looks_like_claim(para) or not chunks:
-                emit(para, [])
         return chunks
 
 
