@@ -234,3 +234,33 @@ class TestLoadingChunksFromOlderRuns:
              "cited_reference_ids": [], "is_uncited_claim": False},
         ])
         assert [c.id for c in _load_answer_chunks(tmp_path)] == ["a1-0"]
+
+
+def test_extraction_stage_normalizes_the_answer_and_records_it(tmp_path: Path):
+    settings = _settings(tmp_path)
+    answer_path = tmp_path / "resposta.md"
+    answer_path.write_text(
+        "A vacina reduziu casos de cancer cervical na Suecia [1, 2]. citeturn9view0\n\n"
+        "## Referências\n\n"
+        "Outra fonte qualquer sobre pagamentos. Disponível em: https://pix.example/a\n\n"
+        "#### Referências citadas\n\n"
+        "Vacina HPV reduz cancer cervical na Suecia, https://vacina.example/suecia\n"
+        "Casos de cancer cervical caem com vacinacao, https://cancer.example/casos\n",
+        encoding="utf-8",
+    )
+    ctx = RunContext(run_id="run-1", settings=settings, answer_path=answer_path, tool_name="ChatGPT")
+
+    ExtractionStage().run(ctx)
+
+    raw = (ctx.run_dir / "input" / "answer_raw.md").read_text(encoding="utf-8")
+    normalized = (ctx.run_dir / "input" / "answer.md").read_text(encoding="utf-8")
+    report = json.loads((ctx.run_dir / "normalization_report.json").read_text(encoding="utf-8"))
+    chunks = json.loads((ctx.run_dir / "answer_chunks.json").read_text(encoding="utf-8"))
+
+    assert "" in raw and "" not in normalized
+    assert report["tool_tokens_removed"] == 1
+    assert report["grouped_markers_expanded"] == 1
+    assert report["primary_list_choice"] == "evidence"
+    assert report["body_markers_without_entry"] == []
+    assert chunks[0]["cited_markers"] == ["[1]", "[2]"]
+    assert "" not in chunks[0]["text"]

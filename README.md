@@ -104,6 +104,25 @@ O arquivo é normalizado para markdown e precisa:
    `<sup>N</sup>`/`[cite: N]` são convertidos automaticamente para `[N]`);
 2. **terminar com uma lista de referências**.
 
+**Normalização.** Logo depois do carregamento, `extraction/normalize.py` leva
+toda resposta, de qualquer ferramenta, ao markdown canônico:
+
+- remove tokens internos de ferramenta (`citeturn9view2turn10search1`, com ou
+  sem os caracteres de uso privado do ChatGPT);
+- separa marcadores agrupados e intervalos (`[2, 6, 9]` → `[2][6][9]`,
+  `[7-9]` → `[7][8][9]`) e converte `<sup>N</sup>`, `[cite: N]` e
+  sobrescritos — preservando expoentes (`m²`, `O(n²)`), que não são citação;
+- com duas ou mais listas de referências (ex.: Gemini `.docx`, que traz a
+  lista pedida no prompt e a sua própria "Referências citadas"), escolhe a
+  lista que o corpo cita pela evidência textual e reescreve o fim do
+  documento como lista principal `[N] Título URL` seguida das demais depois
+  do separador `⁂` (mesma convenção do Perplexity).
+
+Cada execução grava o texto antes (`input/answer_raw.md`) e depois
+(`input/answer.md`) da normalização, e `normalization_report.json` com a
+contagem de cada transformação, as listas encontradas, a lista escolhida e
+avisos (corpo sem marcadores; marcadores sem entrada na lista).
+
 Tabelas markdown no corpo (comuns em respostas do Gemini) são linearizadas
 antes do chunking — cada linha vira `célula — célula` — para não fragmentar a
 citação de cada célula num trecho ilegível.

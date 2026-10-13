@@ -465,6 +465,17 @@ def _find_asterism_list_entries(text: str) -> list[_Entry]:
     return entries
 
 
+def _list_precedes(text: str, pos: int) -> bool:
+    """Ha uma lista de fontes ANTES de `pos` (o `⁂`)? Entao a lista depois
+    dele e a secundaria — a que reenumera tudo o que foi consultado — e seus
+    numeros nao podem disputar os da principal. Lista principal = entradas
+    `[N] Titulo URL` ou um cabecalho de referencias seguido de URL."""
+    head = text[:pos]
+    if _find_reference_entries(head):
+        return True
+    return any("://" in head[match.end() :] for match in _REFERENCE_SECTION_HEADING.finditer(head))
+
+
 def _find_asterism_bare_url_entries(text: str) -> list[_Entry]:
     """Fallback para quando a lista pos-⁂ nao tem nenhuma numeracao (nem
     `N.`, nem `<u>` — formato observado em respostas .docx do Perplexity,
@@ -479,11 +490,16 @@ def _find_asterism_bare_url_entries(text: str) -> list[_Entry]:
     seguida de prosa de verdade e por isso so reconecta um unico token
     sem espaco), aqui e seguro pegar a linha inteira a partir do inicio
     da URL, convertendo qualquer espaco literal remanescente (ex: nome de
-    arquivo com espaco, tipo "Relatorio Final.pdf") em `%20`."""
+    arquivo com espaco, tipo "Relatorio Final.pdf") em `%20`.
+
+    Quando uma lista principal vem antes do `⁂` (`_list_precedes`), as
+    entradas daqui sao a lista secundaria: recebem `_PRIORITY_SECONDARY`, e
+    a mesma URL fica com o numero da principal."""
     asterism_pos = text.find(_ASTERISM)
     if asterism_pos == -1:
         return []
     tail = text[asterism_pos + 1 :]
+    priority = _PRIORITY_SECONDARY if _list_precedes(text, asterism_pos) else _PRIORITY_PRIMARY
 
     entries: list[_Entry] = []
     position = 0
@@ -496,7 +512,7 @@ def _find_asterism_bare_url_entries(text: str) -> list[_Entry]:
             continue
         url = _clean_url(stripped[match.start() :].strip().replace(" ", "%20"))
         position += 1
-        entries.append(_Entry([f"[{position}]"], "", url))
+        entries.append(_Entry([f"[{position}]"], "", url, priority))
 
     return entries
 

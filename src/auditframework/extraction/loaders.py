@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Protocol
 
 from ..common.errors import ExtractionError
+from .normalize import is_exponent, to_superscript
 from .pdf_marker_order import misplaced_marker_runs, repair_marker_order
 from .reflow import reflow_markdown
 
@@ -18,14 +19,19 @@ def _heading_level(style_name: str) -> int | None:
     return None
 
 
-def _docx_run_markdown(run) -> str:
+def _docx_run_markdown(run, prefix: str = "") -> str:
     """Converte um run do python-docx para markdown, preservando o unico
     sinal textual que distingue um marcador de citacao (`font.superscript`)
     de um numero comum de prosa ja achatada — sem isso, "bilheteira1" e
-    indistinguivel de qualquer outro digito colado ao texto."""
+    indistinguivel de qualquer outro digito colado ao texto.
+
+    `prefix` e o texto que vem antes do run no paragrafo: um `2` sobrescrito
+    depois de `m` e expoente (`m²`), nao citacao."""
     text = run.text
     if text and run.font.superscript:
         digits = re.findall(r"\d+", text)
+        if len(digits) == 1 and is_exponent(prefix, digits[0]):
+            return to_superscript(digits[0])
         if digits:
             return "".join(f"[{d}]" for d in digits)
     return text
@@ -44,9 +50,12 @@ def _docx_paragraph_markdown(paragraph) -> str:
     parts: list[str] = []
     for item in paragraph.iter_inner_content():
         if hasattr(item, "runs"):  # Hyperlink: agrega seus proprios runs
-            parts.append("".join(_docx_run_markdown(r) for r in item.runs) or item.text)
+            inner: list[str] = []
+            for r in item.runs:
+                inner.append(_docx_run_markdown(r, prefix=("".join(parts) + "".join(inner))[-12:]))
+            parts.append("".join(inner) or item.text)
         else:
-            parts.append(_docx_run_markdown(item))
+            parts.append(_docx_run_markdown(item, prefix="".join(parts)[-12:]))
     text = "".join(parts)
 
     level = _heading_level(paragraph.style.name) if paragraph.style is not None else None

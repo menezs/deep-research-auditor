@@ -2,29 +2,11 @@ from __future__ import annotations
 
 import re
 
+from ..extraction.normalize import UNICODE_SUPERSCRIPT_MAP, normalize_markers
 from ..models import AnswerChunk, Reference, ReferenceChunk
 from .segmentation import sentence_boundaries
 
 _BRACKET_RE = re.compile(r"\[\s*(\d+)\s*\]")
-_SUP_RE = re.compile(r"<sup>\s*(\d+)\s*</sup>", re.IGNORECASE)
-_SUB_RE = re.compile(r"<sub>\s*(\d+)\s*</sub>", re.IGNORECASE)
-# Gemini/Docs: `[cite_start]` (abre) e `[cite: 12]` / `[cite: 12, 13]` (fecha).
-_CITE_START_RE = re.compile(r"\[cite_start\]", re.IGNORECASE)
-_CITE_RE = re.compile(r"\[cite:\s*([\d,\s]+)\]", re.IGNORECASE)
-
-_UNICODE_SUPERSCRIPT_MAP = {
-    "⁰": "0",
-    "¹": "1",
-    "²": "2",
-    "³": "3",
-    "⁴": "4",
-    "⁵": "5",
-    "⁶": "6",
-    "⁷": "7",
-    "⁸": "8",
-    "⁹": "9",
-}
-_UNICODE_SUPERSCRIPT_RE = re.compile("[" + "".join(_UNICODE_SUPERSCRIPT_MAP) + "]+")
 
 _HEADER_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 
@@ -85,7 +67,7 @@ def _split_paragraphs(text: str) -> list[str]:
 
 
 _ROW_HAS_MARKER_RE = re.compile(
-    r"<sup>\s*\d|<sub>\s*\d|\[\s*\d+\s*\]|\[cite:|[" + "".join(_UNICODE_SUPERSCRIPT_MAP) + "]"
+    r"<sup>\s*\d|<sub>\s*\d|\[\s*\d+\s*\]|\[cite:|[" + "".join(UNICODE_SUPERSCRIPT_MAP) + "]"
 )
 
 
@@ -133,23 +115,10 @@ def _linearize_markdown_tables(text: str) -> str:
 
 
 def _normalize_citation_markers(text: str) -> str:
-    """Converte `<sup>2</sup>`, `<sub>2</sub>` e superscripts unicode
-    (²³¹...) para a forma canonica `[2]`, para que um unico regex
-    reconheca todas as variacoes de marcador de citacao usadas pelas
-    ferramentas de Deep Research — portado de
-    `syntex/src/reference_extractor.py`."""
-    text = _CITE_START_RE.sub("", text)
-    text = _CITE_RE.sub(
-        lambda m: "".join(f"[{n.strip()}]" for n in m.group(1).split(",") if n.strip()),
-        text,
-    )
-    text = _SUP_RE.sub(lambda m: f"[{m.group(1)}]", text)
-    text = _SUB_RE.sub(lambda m: f"[{m.group(1)}]", text)
-    text = _UNICODE_SUPERSCRIPT_RE.sub(
-        lambda m: "[" + "".join(_UNICODE_SUPERSCRIPT_MAP[c] for c in m.group(0)) + "]",
-        text,
-    )
-    return text
+    """Forma canonica `[N]` para todas as variacoes de marcador. A regra vive
+    em `extraction.normalize.normalize_markers` (uma so implementacao para o
+    pipeline e para o chunker); aqui so delega."""
+    return normalize_markers(text)
 
 
 def _group_runs(matches: list[re.Match], text: str) -> list[tuple[list[str], int, int]]:
