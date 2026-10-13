@@ -14,6 +14,7 @@ from tqdm import tqdm
 from .common.errors import ConfigurationError, LLMParseError
 from .config import Settings
 from .extraction.loaders import load_answer
+from .extraction.normalize import add_extraction_warnings, normalize_answer
 from .extraction.reference_extractor import (
     ReferenceExtractionStrategy,
     body_section_start,
@@ -206,10 +207,15 @@ class ExtractionStage:
         self.extractor = extractor
 
     def run(self, ctx: RunContext) -> None:
-        text = load_answer(ctx.answer_path)
+        raw_text = load_answer(ctx.answer_path)
+        # Tudo que vem depois (lista de fontes, chunking, source_info) le o
+        # texto NORMALIZADO; o original fica gravado ao lado para que cada
+        # transformacao seja conferivel contra ele.
+        text, normalization = normalize_answer(raw_text)
 
         input_dir = ctx.run_dir / "input"
         input_dir.mkdir(parents=True, exist_ok=True)
+        (input_dir / "answer_raw.md").write_text(raw_text, encoding="utf-8")
         (input_dir / "answer.md").write_text(text, encoding="utf-8")
         shutil.copy2(ctx.answer_path, input_dir / f"original{ctx.answer_path.suffix}")
 
@@ -235,6 +241,16 @@ class ExtractionStage:
         body = _strip_reference_section(text)
         chunks = AnswerChunker().chunk(body, answer_id=ctx.run_id, references=auditable)
         _save_answer_chunks(ctx.run_dir, chunks)
+        add_extraction_warnings(
+            normalization,
+            cited_markers={m for c in chunks for m in c.cited_markers},
+            listed_markers={m for r in auditable for m in r.citation_markers},
+        )
+        (ctx.run_dir / "normalization_report.json").write_text(
+            normalization.model_dump_json(indent=2), encoding="utf-8"
+        )
+        for warning in normalization.warnings:
+            logger.warning("Normalizacao: %s", warning)
         if not chunks:
             logger.warning(
                 "Nenhuma afirmacao citada encontrada em %s: a resposta nao usa marcadores `[N]` no "

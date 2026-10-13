@@ -936,3 +936,27 @@ class TestRobustnessAcrossInputShapes:
             for marker in ref.citation_markers:
                 assert marker not in owners, f"{marker} reivindicado duas vezes em {shape!r}"
                 owners[marker] = ref.id
+
+
+class TestBareUrlListAfterAsterism:
+    def test_is_secondary_when_a_numbered_list_precedes_it(self):
+        text = (
+            "Corpo citando [1] e [2].\n\n## Referências\n\n"
+            "[1] Titulo A, https://a.example/x\n[2] Titulo B, https://b.example/y\n\n"
+            "⁂\n\nOutra fonte. Disponível em: https://c.example/z\nTitulo A. Disponível em: https://a.example/x\n"
+        )
+        refs = {r.normalized_url: r for r in extract_references(text, source_answer_id="a", tool_name="t")}
+
+        assert refs["https://a.example/x"].citation_markers == ["[1]"]
+        assert refs["https://a.example/x"].from_secondary_list is False
+        assert refs["https://b.example/y"].citation_markers == ["[2]"]
+        assert refs["https://c.example/z"].from_secondary_list is True
+        assert refs["https://c.example/z"].citation_markers == []
+
+    def test_stays_primary_when_nothing_precedes_the_asterism(self):
+        text = "Resumo citando [1] e [2].\n\n⁂\n\nhttps://a.example/x\nhttps://b.example/y\n"
+        refs = {r.normalized_url: r for r in extract_references(text, source_answer_id="a", tool_name="t")}
+
+        assert refs["https://a.example/x"].citation_markers == ["[1]"]
+        assert refs["https://b.example/y"].citation_markers == ["[2]"]
+        assert not any(r.from_secondary_list for r in refs.values())

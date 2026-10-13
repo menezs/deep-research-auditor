@@ -185,3 +185,18 @@ class TestDocxAnswerLoader:
 
         text = DocxAnswerLoader().load(path)
         assert "texto[1]" in text
+
+    def test_superscript_exponent_after_a_unit_is_not_a_marker(self, tmp_path):
+        import docx
+
+        document = docx.Document()
+        p = document.add_paragraph("Taxa de 1,73 m")
+        sup_run = p.add_run("2")
+        sup_run.font.superscript = True
+        p.add_run(" mais lenta")
+        path = tmp_path / "resposta.docx"
+        document.save(path)
+
+        text = DocxAnswerLoader().load(path)
+        assert "1,73 m² mais lenta" in text
+        assert "[2]" not in text

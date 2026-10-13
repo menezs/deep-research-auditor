@@ -317,3 +317,13 @@ class TestSentenceTail:
         for text in ("[1] World Journal of Oncology.", "> <u>[1]</u> Frontiers | Cervical cancer review"):
             chunks = AnswerChunker().chunk(text, answer_id="a1", references=[_ref("refA", ["[1]"])])
             assert chunks == [], f"nao deveria emitir chunk para {text!r}"
+
+
+def test_unit_exponent_is_not_a_citation():
+    text = "A filtracao caiu 1,73 m² mais lenta [15]."
+    refs = [_ref("refA", ["[2]"]), _ref("refB", ["[15]"])]
+
+    chunks = AnswerChunker().chunk(text, answer_id="a1", references=refs)
+
+    assert [c.cited_markers for c in chunks] == [["[15]"]]
+    assert chunks[0].cited_reference_ids == ["refB"]
