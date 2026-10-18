@@ -50,6 +50,33 @@ class TestParseJsonObject:
         with pytest.raises(LLMParseError):
             parse_json_object("isso nao e json nenhum")
 
+    def test_parses_object_with_duplicated_opening_brace(self):
+        """Regressao: o GLM (via OpenRouter) as vezes abre a resposta com
+        `{` repetido (`{\\n{"cited_excerpts": ...}`) e fecha uma vez so."""
+        raw = (
+            '{\n{\n  "cited_excerpts": [],\n  "justification": "A janela nao trata o claim.",'
+            '\n  "relation": "not_addressed"\n}'
+        )
+        assert parse_json_object(raw) == {
+            "cited_excerpts": [],
+            "justification": "A janela nao trata o claim.",
+            "relation": "not_addressed",
+        }
+
+    def test_parses_compact_object_with_duplicated_opening_brace(self):
+        raw = '{\n{"verdict":"unsupported","per_reference":[{"reference_id":"r1","relation":"absent"}]}'
+        assert parse_json_object(raw) == {
+            "verdict": "unsupported",
+            "per_reference": [{"reference_id": "r1", "relation": "absent"}],
+        }
+
+    def test_parses_object_with_duplicated_braces_on_both_ends(self):
+        assert parse_json_object('{\n{"a": 1}\n}') == {"a": 1}
+
+    def test_duplicated_brace_with_trailing_garbage_still_fails(self):
+        with pytest.raises(LLMParseError):
+            parse_json_object('{\n{"a": 1} texto solto')
+
 
 class TestCostUsd:
     def test_local_provider_is_always_free(self):

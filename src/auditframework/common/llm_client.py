@@ -18,6 +18,7 @@ T = TypeVar("T", bound=BaseModel)
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 _BARE_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
+_DUPLICATED_OPEN_BRACE_RE = re.compile(r"^\{\s*(?=\{)")
 
 
 @dataclass
@@ -53,6 +54,9 @@ def parse_json_object(raw_text: str) -> dict:
             return json.loads(candidate)
         except json.JSONDecodeError:
             continue
+    repaired = _decode_with_duplicated_open_brace(text)
+    if repaired is not None:
+        return repaired
     raise LLMParseError(f"resposta do LLM nao e JSON valido: {raw_text!r}")
 
 
@@ -64,6 +68,26 @@ def _extract_fenced(text: str) -> str | None:
 def _extract_bare_object(text: str) -> str | None:
     match = _BARE_OBJECT_RE.search(text)
     return match.group(0) if match else None
+
+
+def _decode_with_duplicated_open_brace(text: str) -> dict | None:
+    """Alguns modelos (ex: GLM via OpenRouter) abrem a resposta com `{`
+    repetido — `{\n{"verdict": ...}` — e fecham uma vez so (ou repetem
+    tambem o `}`). Remove as chaves de abertura excedentes e decodifica o
+    objeto que sobra; depois dele so pode haver espaco e `}`, para nao
+    aceitar como valida uma resposta truncada ou com texto solto."""
+    stripped = text
+    while match := _DUPLICATED_OPEN_BRACE_RE.match(stripped):
+        stripped = stripped[match.end():]
+    if stripped == text:
+        return None
+    try:
+        obj, end = json.JSONDecoder().raw_decode(stripped)
+    except json.JSONDecodeError:
+        return None
+    if stripped[end:].strip(" \t\r\n}"):
+        return None
+    return obj if isinstance(obj, dict) else None
 
 
 def _tighten_object_schema(node: dict) -> None:

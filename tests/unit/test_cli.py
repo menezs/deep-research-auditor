@@ -230,7 +230,7 @@ def test_run_command_writes_log_txt_in_run_dir(tmp_path, monkeypatch):
     run_id = cli_module.make_run_id(answer_file)
     log = (settings.run_dir(run_id) / "log.txt").read_text(encoding="utf-8")
     assert f"Iniciando run {run_id}" in log
-    assert "Relatorio gerado em" in log
+    assert log.count("Relatorio gerado em") == 1
 
 
 def test_resume_command_appends_to_existing_log(tmp_path, monkeypatch):

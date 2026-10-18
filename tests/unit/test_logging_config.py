@@ -12,6 +12,7 @@ from auditframework import logging_config
 from auditframework.config import Settings
 from auditframework.logging_config import (
     RUN_LOG_FILENAME,
+    RUN_LOG_RECORDS_FILENAME,
     _JsonFormatter,
     attach_run_log,
     detach_run_log,
@@ -241,3 +242,169 @@ class TestRunLog:
 
     def test_record_terminal_output_without_attached_log_is_noop(self):
         record_terminal_output("nada acontece")
+
+
+class TestRunLogMirrorsTerminal:
+    """Tudo o que vai para stdout/stderr durante a run (print, warnings,
+    barras de progresso de bibliotecas) tambem entra no log.txt."""
+
+    def _read(self, run_dir) -> str:
+        return (run_dir / RUN_LOG_FILENAME).read_text(encoding="utf-8")
+
+    def test_print_to_stdout_is_recorded(self, tmp_path):
+        setup_logging(Settings(log_format="text"))
+
+        attach_run_log(tmp_path)
+        print("saida direta de uma biblioteca")
+        detach_run_log()
+
+        assert "saida direta de uma biblioteca" in self._read(tmp_path)
+
+    def test_python_warning_on_stderr_is_recorded(self, tmp_path):
+        import warnings
+
+        setup_logging(Settings(log_format="text"))
+
+        attach_run_log(tmp_path)
+        with warnings.catch_warnings():
+            warnings.simplefilter("always")
+            warnings.warn("argumento obsoleto", FutureWarning)
+        detach_run_log()
+
+        assert "FutureWarning: argumento obsoleto" in self._read(tmp_path)
+
+    def test_progress_bar_is_recorded_once_in_its_final_state(self, tmp_path):
+        import sys
+
+        setup_logging(Settings(log_format="text"))
+
+        attach_run_log(tmp_path)
+        for pct in (10, 50, 100):
+            sys.stderr.write(f"\rJulgando chunks: {pct}%")
+        sys.stderr.write("\n")
+        detach_run_log()
+
+        content = self._read(tmp_path)
+        assert content.count("Julgando chunks") == 1
+        assert "Julgando chunks: 100%" in content
+
+    def test_interrupted_progress_bar_keeps_its_last_state(self, tmp_path):
+        import sys
+
+        setup_logging(Settings(log_format="text"))
+
+        attach_run_log(tmp_path)
+        sys.stderr.write("\rJulgando chunks: 10%")
+        sys.stderr.write("\rJulgando chunks: 68%")
+        detach_run_log()
+
+        assert "Julgando chunks: 68%" in self._read(tmp_path)
+
+    def test_ansi_color_codes_are_stripped(self, tmp_path):
+        import sys
+
+        setup_logging(Settings(log_format="text"))
+
+        attach_run_log(tmp_path)
+        sys.stdout.write("\x1b[31mtexto vermelho\x1b[0m\n")
+        detach_run_log()
+
+        content = self._read(tmp_path)
+        assert "texto vermelho" in content
+        assert "\x1b" not in content
+
+    def test_log_records_are_not_duplicated_by_the_mirror(self, tmp_path):
+        setup_logging(Settings(log_format="text"))
+
+        attach_run_log(tmp_path)
+        logging.getLogger("auditframework.pipeline").warning("aviso unico")
+        stage_banner("judging", 4, 5)
+        detach_run_log()
+
+        content = self._read(tmp_path)
+        assert content.count("aviso unico") == 1
+        assert content.count("judging") == 1
+
+    def test_detach_restores_stdout_and_stderr(self, tmp_path):
+        import sys
+
+        out, err = sys.stdout, sys.stderr
+        attach_run_log(tmp_path)
+        detach_run_log()
+
+        assert sys.stdout is out
+        assert sys.stderr is err
+
+
+class TestRunLogFormats:
+    """`log.txt` quebra as linhas longas para leitura (largura 120, recuo
+    alinhado com o inicio da mensagem); `log_registros.txt` tem uma linha
+    por registro, para busca e script."""
+
+    LONG = "inicio " + "palavra " * 60 + "fim"
+
+    def _read(self, run_dir, name) -> str:
+        return (run_dir / name).read_text(encoding="utf-8")
+
+    def _log(self, tmp_path, emit):
+        setup_logging(Settings(log_format="text"))
+        attach_run_log(tmp_path)
+        emit(logging.getLogger("auditframework.pipeline"))
+        detach_run_log()
+        return self._read(tmp_path, RUN_LOG_FILENAME), self._read(tmp_path, RUN_LOG_RECORDS_FILENAME)
+
+    def test_records_file_lives_next_to_log_txt(self):
+        assert RUN_LOG_RECORDS_FILENAME == "log_registros.txt"
+
+    def test_long_message_wraps_in_log_txt_with_aligned_indent(self, tmp_path):
+        legivel, _ = self._log(tmp_path, lambda log: log.warning(self.LONG))
+
+        lines = legivel.splitlines()
+        assert len(lines) > 1
+        assert all(len(line) <= 120 for line in lines)
+        indent = " " * len("2026-10-18 14:25:16,821 WARNING  ")
+        assert all(line.startswith(indent) and line[len(indent)] != " " for line in lines[1:])
+        assert " ".join(line.strip() for line in lines).endswith(self.LONG)
+
+    def test_long_message_is_one_line_in_records_file(self, tmp_path):
+        _, registros = self._log(tmp_path, lambda log: log.warning(self.LONG))
+
+        lines = registros.splitlines()
+        assert len(lines) == 1
+        assert lines[0].endswith(f"auditframework.pipeline: {self.LONG}")
+
+    def test_multiline_message_is_escaped_in_records_and_indented_in_log_txt(self, tmp_path):
+        legivel, registros = self._log(tmp_path, lambda log: log.warning('resposta: {\n  "verdict": "x"\n}'))
+
+        assert registros.splitlines() == [registros.rstrip("\n")]
+        assert 'resposta: {\\n  "verdict": "x"\\n}' in registros
+        indent = " " * len("2026-10-18 14:25:16,821 WARNING  ")
+        assert legivel.splitlines()[1] == indent + '  "verdict": "x"'
+
+    def test_traceback_is_one_line_in_records_file(self, tmp_path):
+        def emit(log):
+            try:
+                raise RuntimeError("falha simulada")
+            except RuntimeError:
+                log.exception("estagio quebrou")
+
+        legivel, registros = self._log(tmp_path, emit)
+
+        assert len(registros.splitlines()) == 1
+        assert "Traceback" in registros and "falha simulada" in registros
+        assert "Traceback" in legivel and "falha simulada" in legivel
+
+    def test_long_url_is_not_split_in_log_txt(self, tmp_path):
+        url = "https://exemplo.org/" + "a" * 150
+        legivel, _ = self._log(tmp_path, lambda log: log.warning("Barreira de acesso em %s", url))
+
+        assert url in legivel
+
+    def test_terminal_output_goes_to_both_files(self, tmp_path):
+        setup_logging(Settings(log_format="text"))
+        attach_run_log(tmp_path)
+        print("saida direta")
+        detach_run_log()
+
+        assert "saida direta" in self._read(tmp_path, RUN_LOG_FILENAME)
+        assert "saida direta" in self._read(tmp_path, RUN_LOG_RECORDS_FILENAME)

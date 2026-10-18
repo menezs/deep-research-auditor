@@ -35,12 +35,6 @@ app = typer.Typer(
 )
 
 
-def _echo(message: str) -> None:
-    """`typer.echo` que tambem fica registrado no `log.txt` da run."""
-    typer.echo(message)
-    record_terminal_output(message)
-
-
 def _run_pipeline(settings: Settings, ctx: RunContext) -> None:
     logger = get_logger(__name__)
     try:
@@ -49,7 +43,7 @@ def _run_pipeline(settings: Settings, ctx: RunContext) -> None:
         record_exception(f"Run {ctx.run_id} interrompida por erro")
         raise
     logger.info("Run %s concluida", ctx.run_id)
-    _echo(f"Relatorio gerado em {ctx.run_dir / 'report.md'}")
+    typer.echo(f"Relatorio gerado em {ctx.run_dir / 'report.md'}")
 
 
 @app.command()
@@ -122,15 +116,15 @@ def reclassify(
     try:
         record_terminal_output(f"audit reclassify {run_id}{' --dry-run' if dry_run else ''}")
         blocked = reclassify_documents(ReferenceRegistry(ctx.run_dir), dry_run=dry_run)
-        _echo(f"{run_id}: {len(blocked)} referencia(s) com barreira de acesso")
+        typer.echo(f"{run_id}: {len(blocked)} referencia(s) com barreira de acesso")
         for ref in blocked:
-            _echo(f"  {ref.raw_url} — {ref.barrier_kind} — {ref.error_message}")
+            typer.echo(f"  {ref.raw_url} — {ref.barrier_kind} — {ref.error_message}")
         if dry_run or not blocked:
             return
         backup = invalidate_after_ingestion(ctx.run_dir)
         if backup is not None:
-            _echo(f"Artefatos de indexacao/julgamento movidos para {backup}")
-            _echo(f"Rode: audit resume {run_id}")
+            typer.echo(f"Artefatos de indexacao/julgamento movidos para {backup}")
+            typer.echo(f"Rode: audit resume {run_id}")
     finally:
         detach_run_log()
 

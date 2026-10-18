@@ -112,10 +112,19 @@ derivado deterministicamente do hash do conteúdo do arquivo + timestamp.
 `audit resume` pula por inteiro estágios já persistidos e, dentro do
 julgamento, pula chunk a chunk os que já têm resultado — nada é refeito.
 
-`run`, `resume` e `reclassify` gravam tudo o que aparece no terminal em
-`data/runs/<run_id>/log.txt` (texto puro, com data/hora por linha, incluindo o
-traceback quando a run falha). O arquivo é acrescido a cada execução, então um
-`audit resume` continua o log da mesma run. As barras de progresso ficam de fora.
+`run`, `resume` e `reclassify` gravam tudo o que aparece no terminal (logs,
+avisos de bibliotecas, `print`, barras de progresso no estado final, traceback
+quando a run falha), em texto puro e com data/hora, em dois arquivos de
+`data/runs/<run_id>/`:
+
+- `log.txt` — para leitura: linhas longas quebradas em 120 colunas, com a
+  continuação recuada até o início da mensagem (URLs e caminhos não são
+  partidos);
+- `log_registros.txt` — um registro por linha (quebras internas escapadas como
+  `\n`), para `grep` e scripts.
+
+Os dois são acrescidos a cada execução, então um `audit resume` continua o log
+da mesma run.
 
 ### Barreiras de acesso
 
