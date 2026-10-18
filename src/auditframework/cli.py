@@ -6,12 +6,18 @@ import typer
 
 from .common import make_run_id
 from .common.errors import ConfigurationError
-from .config import get_settings
-from .logging_config import get_logger, setup_logging
+from .config import Settings, get_settings
+from .logging_config import (
+    attach_run_log,
+    detach_run_log,
+    get_logger,
+    record_exception,
+    record_terminal_output,
+    setup_logging,
+)
 from .ingestion.registry import ReferenceRegistry
 from .ingestion.service import reclassify_documents
 from .pipeline import (
-    Pipeline,
     RunContext,
     build_pipeline,
     invalidate_after_ingestion,
@@ -29,11 +35,21 @@ app = typer.Typer(
 )
 
 
-def _run_pipeline(pipeline: Pipeline, ctx: RunContext) -> None:
+def _echo(message: str) -> None:
+    """`typer.echo` que tambem fica registrado no `log.txt` da run."""
+    typer.echo(message)
+    record_terminal_output(message)
+
+
+def _run_pipeline(settings: Settings, ctx: RunContext) -> None:
     logger = get_logger(__name__)
-    pipeline.run(ctx)
+    try:
+        build_pipeline(settings).run(ctx)
+    except Exception:
+        record_exception(f"Run {ctx.run_id} interrompida por erro")
+        raise
     logger.info("Run %s concluida", ctx.run_id)
-    typer.echo(f"Relatorio gerado em {ctx.run_dir / 'report.md'}")
+    _echo(f"Relatorio gerado em {ctx.run_dir / 'report.md'}")
 
 
 @app.command()
@@ -52,12 +68,14 @@ def run(
     logger = get_logger(__name__)
 
     run_id = make_run_id(answer_file)
-    logger.info("Iniciando run %s para %s (ferramenta=%s)", run_id, answer_file, tool_name)
-
     ctx = RunContext(run_id=run_id, settings=settings, answer_path=answer_file, tool_name=tool_name)
-    save_run_meta(ctx)
-
-    _run_pipeline(build_pipeline(settings), ctx)
+    attach_run_log(ctx.run_dir)
+    try:
+        logger.info("Iniciando run %s para %s (ferramenta=%s)", run_id, answer_file, tool_name)
+        save_run_meta(ctx)
+        _run_pipeline(settings, ctx)
+    finally:
+        detach_run_log()
 
 
 @app.command()
@@ -67,7 +85,6 @@ def resume(run_id: str = typer.Argument(..., help="Identificador de uma execucao
     settings = get_settings()
     setup_logging(settings)
     logger = get_logger(__name__)
-    logger.info("Retomando run %s", run_id)
 
     try:
         ctx = load_run_context(run_id, settings)
@@ -75,7 +92,12 @@ def resume(run_id: str = typer.Argument(..., help="Identificador de uma execucao
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
 
-    _run_pipeline(build_pipeline(settings), ctx)
+    attach_run_log(ctx.run_dir)
+    try:
+        logger.info("Retomando run %s", run_id)
+        _run_pipeline(settings, ctx)
+    finally:
+        detach_run_log()
 
 
 @app.command()
@@ -96,16 +118,21 @@ def reclassify(
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
 
-    blocked = reclassify_documents(ReferenceRegistry(ctx.run_dir), dry_run=dry_run)
-    typer.echo(f"{run_id}: {len(blocked)} referencia(s) com barreira de acesso")
-    for ref in blocked:
-        typer.echo(f"  {ref.raw_url} — {ref.barrier_kind} — {ref.error_message}")
-    if dry_run or not blocked:
-        return
-    backup = invalidate_after_ingestion(ctx.run_dir)
-    if backup is not None:
-        typer.echo(f"Artefatos de indexacao/julgamento movidos para {backup}")
-        typer.echo(f"Rode: audit resume {run_id}")
+    attach_run_log(ctx.run_dir)
+    try:
+        record_terminal_output(f"audit reclassify {run_id}{' --dry-run' if dry_run else ''}")
+        blocked = reclassify_documents(ReferenceRegistry(ctx.run_dir), dry_run=dry_run)
+        _echo(f"{run_id}: {len(blocked)} referencia(s) com barreira de acesso")
+        for ref in blocked:
+            _echo(f"  {ref.raw_url} — {ref.barrier_kind} — {ref.error_message}")
+        if dry_run or not blocked:
+            return
+        backup = invalidate_after_ingestion(ctx.run_dir)
+        if backup is not None:
+            _echo(f"Artefatos de indexacao/julgamento movidos para {backup}")
+            _echo(f"Rode: audit resume {run_id}")
+    finally:
+        detach_run_log()
 
 
 @app.command()

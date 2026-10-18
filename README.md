@@ -16,39 +16,55 @@ O resultado é um relatório `.md` + `.json`.
 flowchart TD
     IN["Resposta<br/>.md / .pdf / .docx"]
 
-    subgraph EXT["extraction/"]
-        IN -->|AnswerLoader| TXT["Texto bruto"]
+    subgraph EXT["1 · extraction/"]
+        IN -->|AnswerLoader| RAW["Texto bruto"]
+        RAW -->|normalize_answer| TXT["Markdown canônico"]
         TXT -->|"ReferenceExtractor (regex/LLM)"| REF["Reference<br/>id = hash(url)"]
+        TXT -->|AnswerChunker| CHK["AnswerChunk<br/>1 sentença + seus [N]"]
     end
 
-    subgraph ING["ingestion/"]
-        REF -->|"Fetcher (Reddit→API .json; senão curl_cffi→cloudscraper→playwright)<br/>+ Converter → Markdown"| DOC["Document<br/>+ Reference.status"]
+    subgraph ING["2 · ingestion/"]
+        REF -->|"Fetcher (Reddit→API .json; senão curl_cffi→cloudscraper→playwright)<br/>+ Converter → Markdown"| BAR{"detect_barrier"}
+        BAR -->|conteúdo real| DOC["Document<br/>DOWNLOADED"]
+        BAR -->|barreira| BLK["BLOCKED<br/>id.blocked.md"]
+        REF -.->|falha de rede| FAIL["DEAD / INACCESSIBLE / ERROR"]
     end
 
-    subgraph IDX["indexing/"]
-        TXT -->|AnswerChunker| CHK["AnswerChunk<br/>cited_reference_ids"]
+    subgraph IDX["3 · indexing/"]
         DOC -->|"DocumentChunker + Embedder"| VS[("FaissVectorStore")]
-        CHK --> RET["Retriever (escopado pela ref citada)"]
+    end
+
+    subgraph JUD["4 · judging/"]
+        CHK --> RET["Retriever<br/>escopado pelas refs citadas"]
         VS --> RET
         RET --> CUR["CuratedDocument"]
-    end
-
-    subgraph JUD["judging/"]
+        CUR -->|"nenhuma fonte citada com conteúdo"| SKIP["SkippedChunk"]
         CUR -->|Verifier| V0{"veredito inicial"}
         V0 -->|"SUPPORTED / CONTRADICTED"| RES["AuditResult"]
         V0 -->|UNSUPPORTED| CASC["VerificationCascade<br/>A → B → C"]
         CASC --> RES
     end
 
-    subgraph REP["reporting/"]
+    subgraph REP["5 · reporting/"]
         RES -->|"aggregate + render"| OUT["Report .md / .json"]
+        SKIP --> OUT
+        BLK -.-> OUT
+        FAIL -.-> OUT
     end
 ```
 
 Cada seta é uma função que recebe/devolve um modelo Pydantic — nunca um path ou
 posição de lista como contrato implícito. `pipeline.py` orquestra os 5 estágios
 e persiste cada etapa em `data/runs/<run_id>/`, permitindo retomada por
-`audit resume`.
+`audit resume`:
+
+| Estágio | O que faz | Grava em `data/runs/<run_id>/` |
+|---|---|---|
+| 1. Extração | carrega e normaliza a resposta, extrai a lista de fontes e divide o corpo em afirmações citadas | `input/`, `references.json`, `normalization_report.json`, chunks da resposta |
+| 2. Ingestão | baixa cada fonte, converte para Markdown e separa conteúdo real de barreira de acesso | `documents/<id>.md`, `documents/<id>.blocked.md`, status em `references.json` |
+| 3. Indexação | fatia os documentos com conteúdo, gera embeddings e monta o índice | `index/faiss.index`, `index/chunks.json` |
+| 4. Julgamento | recupera o contexto de cada afirmação (sem LLM), julga com o LLM e passa os `UNSUPPORTED` pela cascata | `curated/`, `audit_results.jsonl`, `skipped_chunks.jsonl` |
+| 5. Relatório | agrega vereditos, status das fontes e custo | `report.md`, `report.json`, `tabela_chunks_veredito.md` |
 
 ## Instalação
 
@@ -95,6 +111,11 @@ nesse caso.
 derivado deterministicamente do hash do conteúdo do arquivo + timestamp.
 `audit resume` pula por inteiro estágios já persistidos e, dentro do
 julgamento, pula chunk a chunk os que já têm resultado — nada é refeito.
+
+`run`, `resume` e `reclassify` gravam tudo o que aparece no terminal em
+`data/runs/<run_id>/log.txt` (texto puro, com data/hora por linha, incluindo o
+traceback quando a run falha). O arquivo é acrescido a cada execução, então um
+`audit resume` continua o log da mesma run. As barras de progresso ficam de fora.
 
 ### Barreiras de acesso
 
@@ -170,7 +191,7 @@ inicial** (o *baseline*), em duas fases:
    Esses 10 trechos, ordenados por score e com cabeçalho de proveniência
    (`[referencia=… score=…]`), formam o `CuratedDocument` — o contexto que o
    juiz vê. Se o chunk não cita nenhuma referência, ou a referência citada não
-   pôde ser baixada (morta/inacessível), não há o que recuperar: o chunk **não
+   pôde ser baixada (morta/inacessível/bloqueada), não há o que recuperar: o chunk **não
    é julgado**, vira `SKIPPED` no relatório e a auditoria continua.
 2. **Julgamento (1 chamada de LLM por chunk), serial.** O juiz recebe o texto do
    chunk + o `CuratedDocument` e devolve o veredito do chunk (`SUPPORTED` /
@@ -321,12 +342,12 @@ texto do trecho, veredito (`SUPPORTED`/`UNSUPPORTED`/`CONTRADICTED`, ou
 
 ```
 src/auditframework/
-├── cli.py            # audit run / resume / report / compare
+├── cli.py            # audit run / resume / reclassify / report / compare
 ├── pipeline.py       # Pipeline + RunContext + 5 estágios
 ├── config.py         # Settings (pydantic-settings, lê .env)
 ├── models/           # contrato Pydantic compartilhado
 ├── extraction/       # resposta → Reference (citações) + SourceInfo (forense do arquivo)
-├── ingestion/        # Reference → Document (download + conversão; Reddit via API .json)
+├── ingestion/        # Reference → Document (download + conversão + barreiras; Reddit via API .json)
 ├── indexing/         # chunking de documentos, embeddings, FAISS, retrieval
 ├── judging/          # juiz LLM
 │   └── verification/ # cascata A → B → C sobre vereditos UNSUPPORTED

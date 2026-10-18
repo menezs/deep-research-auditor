@@ -25,6 +25,19 @@ def _fake_build_pipeline(settings: Settings) -> Pipeline:
     return pipeline
 
 
+class _ExplodingStage:
+    name = "explode"
+
+    def run(self, ctx: RunContext) -> None:
+        raise RuntimeError("falha simulada no estagio")
+
+
+def _exploding_build_pipeline(settings: Settings) -> Pipeline:
+    pipeline = Pipeline(settings)
+    pipeline.add_stage(_ExplodingStage())
+    return pipeline
+
+
 def _settings(tmp_path: Path) -> Settings:
     return Settings(data_dir=tmp_path / "data", model_cache_dir=tmp_path / "model_cache")
 
@@ -202,3 +215,77 @@ def test_cli_reclassify_sem_barreira_nao_invalida(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert "0 referencia(s)" in result.output
     assert (ctx.run_dir / "index").exists()
+
+
+def test_run_command_writes_log_txt_in_run_dir(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    monkeypatch.setattr(cli_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(cli_module, "build_pipeline", _fake_build_pipeline)
+    answer_file = tmp_path / "resposta.md"
+    answer_file.write_text("Uma resposta qualquer.", encoding="utf-8")
+
+    result = runner.invoke(cli_module.app, ["run", str(answer_file), "--tool", "Gemini"])
+
+    assert result.exit_code == 0, result.output
+    run_id = cli_module.make_run_id(answer_file)
+    log = (settings.run_dir(run_id) / "log.txt").read_text(encoding="utf-8")
+    assert f"Iniciando run {run_id}" in log
+    assert "Relatorio gerado em" in log
+
+
+def test_resume_command_appends_to_existing_log(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    monkeypatch.setattr(cli_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(cli_module, "build_pipeline", _fake_build_pipeline)
+    answer_file = tmp_path / "resposta.md"
+    answer_file.write_text("Uma resposta qualquer.", encoding="utf-8")
+    ctx = RunContext(run_id="run-1", settings=settings, answer_path=answer_file, tool_name="ChatGPT")
+    save_run_meta(ctx)
+    (ctx.run_dir / "log.txt").write_text("log da execucao anterior\n", encoding="utf-8")
+
+    result = runner.invoke(cli_module.app, ["resume", "run-1"])
+
+    assert result.exit_code == 0, result.output
+    log = (ctx.run_dir / "log.txt").read_text(encoding="utf-8")
+    assert log.startswith("log da execucao anterior")
+    assert "Retomando run run-1" in log
+
+
+def test_resume_unknown_run_id_does_not_create_run_dir(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    monkeypatch.setattr(cli_module, "get_settings", lambda: settings)
+
+    runner.invoke(cli_module.app, ["resume", "nunca-existiu"])
+
+    assert not settings.run_dir("nunca-existiu").exists()
+
+
+def test_run_failure_traceback_is_recorded_in_log(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    monkeypatch.setattr(cli_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(cli_module, "build_pipeline", _exploding_build_pipeline)
+    answer_file = tmp_path / "resposta.md"
+    answer_file.write_text("Uma resposta qualquer.", encoding="utf-8")
+
+    result = runner.invoke(cli_module.app, ["run", str(answer_file)])
+
+    assert result.exit_code != 0
+    run_id = cli_module.make_run_id(answer_file)
+    log = (settings.run_dir(run_id) / "log.txt").read_text(encoding="utf-8")
+    assert "Traceback" in log
+    assert "falha simulada no estagio" in log
+
+
+def test_cli_reclassify_records_its_output_in_log(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    monkeypatch.setattr(cli_module, "get_settings", lambda: settings)
+    answer_file = tmp_path / "resposta.md"
+    answer_file.write_text("Uma resposta qualquer.", encoding="utf-8")
+    ctx = RunContext(run_id="run-1", settings=settings, answer_path=answer_file, tool_name="ChatGPT")
+    save_run_meta(ctx)
+
+    result = runner.invoke(cli_module.app, ["reclassify", "run-1", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    log = (ctx.run_dir / "log.txt").read_text(encoding="utf-8")
+    assert "run-1: 0 referencia(s) com barreira de acesso" in log
