@@ -96,3 +96,19 @@ def test_report_minimal_construction():
     )
     assert report.dead_references == []
     assert report.total_cost_usd == 0.0
+
+
+def test_reference_aceita_status_blocked_com_tipo_da_barreira():
+    ref = Reference(
+        id="r1",
+        raw_url="https://example.com",
+        normalized_url="https://example.com",
+        source_answer_id="a",
+        tool_name="ChatGPT",
+        status=ReferenceStatus.BLOCKED,
+        barrier_kind="anti_bot",
+    )
+    dumped = ref.model_dump(mode="json")
+    assert dumped["status"] == "blocked"
+    assert dumped["barrier_kind"] == "anti_bot"
+    assert Reference.model_validate(dumped) == ref

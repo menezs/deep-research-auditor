@@ -81,3 +81,32 @@ def test_no_leftover_tmp_files_after_save(tmp_path: Path):
 
     tmp_files = list(tmp_path.rglob("*.tmp"))
     assert tmp_files == []
+
+
+def test_documento_bloqueado_nao_conta_como_documento(tmp_path: Path):
+    registry = ReferenceRegistry(tmp_path)
+    registry.save_blocked_document("r1", "403 Forbidden")
+
+    assert registry.has_blocked_document("r1")
+    assert not registry.has_document("r1")
+    assert registry.blocked_document_path("r1") == tmp_path / "documents" / "r1.blocked.md"
+    assert registry.blocked_document_path("r1").read_text(encoding="utf-8") == "403 Forbidden"
+
+
+def test_quarentena_move_documento_e_metadados(tmp_path: Path):
+    registry = ReferenceRegistry(tmp_path)
+    document = Document(
+        reference_id="ref1",
+        markdown_path=Path("documents/ref1.md"),
+        content_hash="deadbeef",
+        fetch_method="requests",
+        word_count=1,
+    )
+    registry.save_document(document, "texto")
+
+    registry.quarantine_document("ref1")
+
+    assert not registry.has_document("ref1")
+    assert registry.has_blocked_document("ref1")
+    assert (tmp_path / "documents" / "ref1.blocked.meta.json").exists()
+    assert not (tmp_path / "documents" / "ref1.meta.json").exists()

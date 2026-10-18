@@ -13,6 +13,7 @@ class ReferenceStatus(str, Enum):
     DEAD = "dead"  # 404
     INACCESSIBLE = "inaccessible"  # 403/timeout/SSL apos esgotar retries
     ERROR = "error"
+    BLOCKED = "blocked"  # conteudo baixado e barreira (anti-bot, erro, login...)
 
 
 class Reference(BaseModel):
@@ -51,6 +52,10 @@ class Reference(BaseModel):
     http_status: int | None = None
     fetched_at: datetime | None = None
     error_message: str | None = None
+    barrier_kind: str | None = None
+    """Tipo da barreira (`ingestion.barrier.BarrierKind`) quando `status` e
+    `BLOCKED`: o servidor respondeu, mas o conteudo e tela de anti-bot,
+    erro, exigencia de login/JavaScript ou intersticio, nao o documento."""
     source_answer_id: str
     tool_name: str
 

@@ -47,6 +47,26 @@ class ReferenceRegistry:
     def has_document(self, reference_id: str) -> bool:
         return self.document_path(reference_id).exists()
 
+    def blocked_document_path(self, reference_id: str) -> Path:
+        """Texto de uma barreira de acesso (`ReferenceStatus.BLOCKED`). Fica
+        gravado para a exclusao ser conferivel, com um nome que a indexacao e
+        a cascata de verificacao nao leem (elas so olham `<id>.md`)."""
+        return self.documents_dir / f"{reference_id}.blocked.md"
+
+    def has_blocked_document(self, reference_id: str) -> bool:
+        return self.blocked_document_path(reference_id).exists()
+
+    def save_blocked_document(self, reference_id: str, markdown_content: str) -> None:
+        self._atomic_write(self.blocked_document_path(reference_id), markdown_content)
+
+    def quarantine_document(self, reference_id: str) -> None:
+        """Tira um documento ja baixado da analise sem apaga-lo: `<id>.md`
+        vira `<id>.blocked.md` e os metadados vao junto."""
+        self.document_path(reference_id).replace(self.blocked_document_path(reference_id))
+        metadata = self.metadata_path(reference_id)
+        if metadata.exists():
+            metadata.replace(self.documents_dir / f"{reference_id}.blocked.meta.json")
+
     def load_document(self, reference_id: str) -> Document:
         raw = json.loads(self.metadata_path(reference_id).read_text(encoding="utf-8"))
         return Document.model_validate(raw)
