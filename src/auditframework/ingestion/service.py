@@ -144,6 +144,33 @@ def ingest_references(
     return final_references, documents
 
 
+def reclassify_documents(registry: ReferenceRegistry, *, dry_run: bool = False) -> list[Reference]:
+    """Aplica a deteccao de barreiras aos documentos ja baixados de uma
+    execucao (anteriores a esta checagem), sem baixar nada de novo.
+
+    Devolve as referencias cujo conteudo e barreira, ja com status
+    `BLOCKED`. Sem `dry_run`, cada documento vai para quarentena
+    (`<id>.blocked.md`) e `references.json` e regravado."""
+    references = registry.load_references(include_artifacts=True)
+    blocked: list[Reference] = []
+    updated: list[Reference] = []
+    for ref in references:
+        barrier = None
+        if registry.has_document(ref.id):
+            barrier = detect_barrier(registry.document_path(ref.id).read_text(encoding="utf-8"))
+        if barrier is None:
+            updated.append(ref)
+            continue
+        new_ref = _blocked(ref, barrier, ref.http_status).model_copy(update={"fetched_at": ref.fetched_at})
+        blocked.append(new_ref)
+        updated.append(new_ref)
+    if blocked and not dry_run:
+        for ref in blocked:
+            registry.quarantine_document(ref.id)
+        registry.save_references(updated)
+    return blocked
+
+
 def _persist(
     registry: ReferenceRegistry,
     reference: Reference,

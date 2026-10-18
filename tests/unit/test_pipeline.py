@@ -264,3 +264,38 @@ def test_extraction_stage_normalizes_the_answer_and_records_it(tmp_path: Path):
     assert report["body_markers_without_entry"] == []
     assert chunks[0]["cited_markers"] == ["[1]", "[2]"]
     assert "" not in chunks[0]["text"]
+
+
+def test_invalidate_move_artefatos_e_recorta_estado(tmp_path: Path):
+    import json as _json
+
+    from auditframework.pipeline import invalidate_after_ingestion
+
+    run_dir = tmp_path / "run"
+    (run_dir / "index").mkdir(parents=True)
+    (run_dir / "curated").mkdir()
+    (run_dir / "audit_results.jsonl").write_text("{}\n", encoding="utf-8")
+    (run_dir / "state.json").write_text(
+        _json.dumps({"stages_completed": ["extraction", "ingestion", "indexing", "judging"]}), encoding="utf-8"
+    )
+
+    backup = invalidate_after_ingestion(run_dir)
+
+    assert backup is not None and backup.parent == run_dir and backup.name.startswith("invalidado-")
+    assert sorted(p.name for p in backup.iterdir()) == ["audit_results.jsonl", "curated", "index"]
+    assert not (run_dir / "index").exists() and not (run_dir / "audit_results.jsonl").exists()
+    assert _json.loads((run_dir / "state.json").read_text())["stages_completed"] == ["extraction", "ingestion"]
+
+
+def test_invalidate_sem_artefatos_devolve_none(tmp_path: Path):
+    import json as _json
+
+    from auditframework.pipeline import invalidate_after_ingestion
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    state = _json.dumps({"stages_completed": ["extraction", "ingestion"]})
+    (run_dir / "state.json").write_text(state, encoding="utf-8")
+
+    assert invalidate_after_ingestion(run_dir) is None
+    assert (run_dir / "state.json").read_text(encoding="utf-8") == state

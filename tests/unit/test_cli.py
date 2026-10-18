@@ -172,3 +172,33 @@ def test_compare_command_fails_clearly_for_unknown_run_id(tmp_path, monkeypatch)
 
     assert result.exit_code == 1
     assert "nao encontrada" in result.output
+
+
+def test_cli_reclassify_sem_barreira_nao_invalida(tmp_path, monkeypatch):
+    from auditframework.ingestion.registry import ReferenceRegistry
+    from auditframework.models import Document, Reference, ReferenceStatus
+
+    settings = _settings(tmp_path)
+    monkeypatch.setattr(cli_module, "get_settings", lambda: settings)
+    answer_file = tmp_path / "resposta.md"
+    answer_file.write_text("Uma resposta qualquer.", encoding="utf-8")
+    ctx = RunContext(run_id="run-1", settings=settings, answer_path=answer_file, tool_name="ChatGPT")
+    save_run_meta(ctx)
+    registry = ReferenceRegistry(ctx.run_dir)
+    text = "Texto real e longo o bastante sobre o assunto citado. " * 5
+    registry.save_references([Reference(
+        id="r1", raw_url="https://example.com", normalized_url="https://example.com",
+        status=ReferenceStatus.DOWNLOADED, source_answer_id="a", tool_name="ChatGPT",
+    )])
+    registry.save_document(
+        Document(reference_id="r1", markdown_path=Path("documents/r1.md"), content_hash="x",
+                 fetch_method="requests", word_count=len(text.split())),
+        text,
+    )
+    (ctx.run_dir / "index").mkdir()
+
+    result = runner.invoke(cli_module.app, ["reclassify", "run-1"])
+
+    assert result.exit_code == 0, result.output
+    assert "0 referencia(s)" in result.output
+    assert (ctx.run_dir / "index").exists()

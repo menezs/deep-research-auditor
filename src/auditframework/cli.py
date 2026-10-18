@@ -8,7 +8,17 @@ from .common import make_run_id
 from .common.errors import ConfigurationError
 from .config import get_settings
 from .logging_config import get_logger, setup_logging
-from .pipeline import Pipeline, RunContext, build_pipeline, load_audit_results, load_run_context, save_run_meta
+from .ingestion.registry import ReferenceRegistry
+from .ingestion.service import reclassify_documents
+from .pipeline import (
+    Pipeline,
+    RunContext,
+    build_pipeline,
+    invalidate_after_ingestion,
+    load_audit_results,
+    load_run_context,
+    save_run_meta,
+)
 from .reporting import aggregate_tool_stats, render_tool_comparison_markdown
 
 app = typer.Typer(
@@ -66,6 +76,36 @@ def resume(run_id: str = typer.Argument(..., help="Identificador de uma execucao
         raise typer.Exit(code=1) from exc
 
     _run_pipeline(build_pipeline(settings), ctx)
+
+
+@app.command()
+def reclassify(
+    run_id: str = typer.Argument(..., help="Identificador de uma execucao anterior"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="So lista as barreiras, sem alterar nada"),
+) -> None:
+    """Procura barreiras de acesso (anti-bot, erro, login, intersticio) nos
+    documentos ja baixados de uma execucao e tira essas fontes da analise,
+    sem baixar nada de novo. Os artefatos de indexacao e julgamento ficam
+    invalidos e sao movidos para `invalidado-<data>/`; depois rode
+    `audit resume`."""
+    settings = get_settings()
+    setup_logging(settings)
+    try:
+        ctx = load_run_context(run_id, settings)
+    except ConfigurationError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+    blocked = reclassify_documents(ReferenceRegistry(ctx.run_dir), dry_run=dry_run)
+    typer.echo(f"{run_id}: {len(blocked)} referencia(s) com barreira de acesso")
+    for ref in blocked:
+        typer.echo(f"  {ref.raw_url} — {ref.barrier_kind} — {ref.error_message}")
+    if dry_run or not blocked:
+        return
+    backup = invalidate_after_ingestion(ctx.run_dir)
+    if backup is not None:
+        typer.echo(f"Artefatos de indexacao/julgamento movidos para {backup}")
+        typer.echo(f"Rode: audit resume {run_id}")
 
 
 @app.command()

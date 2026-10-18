@@ -266,3 +266,62 @@ def test_bloqueada_nao_entra_na_retentativa_de_inacessiveis(tmp_path: Path):
     ingest_references([_reference("bot1", bot_url), _reference("off1", off_url)], registry, fetcher=fetcher)
 
     assert fetcher.calls[bot_url] == 2  # fetch + tentativa via playwright, nada na 2a passada
+
+
+_REAL_TEXT = (
+    "O Marco Civil da Internet estabelece principios, garantias, direitos e deveres para o uso da internet "
+    "no Brasil, incluindo neutralidade de rede, protecao de dados pessoais e guarda de registros de acesso."
+)
+
+
+def _registry_with_downloaded(tmp_path: Path) -> ReferenceRegistry:
+    from auditframework.models import Document
+
+    registry = ReferenceRegistry(tmp_path)
+    refs = []
+    for ref_id, text in (("real1", _REAL_TEXT), ("bot1", "Checking your browser before accessing the site ...")):
+        ref = _reference(ref_id, f"https://example.com/{ref_id}").model_copy(
+            update={"status": ReferenceStatus.DOWNLOADED}
+        )
+        refs.append(ref)
+        registry.save_document(
+            Document(
+                reference_id=ref_id,
+                markdown_path=Path(f"documents/{ref_id}.md"),
+                content_hash="x",
+                fetch_method="requests",
+                word_count=len(text.split()),
+            ),
+            text,
+        )
+    registry.save_references(refs)
+    return registry
+
+
+def test_reclassify_bloqueia_documento_de_barreira_ja_baixado(tmp_path: Path):
+    from auditframework.ingestion.service import reclassify_documents
+
+    registry = _registry_with_downloaded(tmp_path)
+
+    blocked = reclassify_documents(registry)
+
+    assert [r.id for r in blocked] == ["bot1"]
+    assert blocked[0].barrier_kind == "anti_bot"
+    statuses = {r.id: r.status for r in registry.load_references()}
+    assert statuses == {"real1": ReferenceStatus.DOWNLOADED, "bot1": ReferenceStatus.BLOCKED}
+    assert registry.has_document("real1") and not registry.has_document("bot1")
+    assert registry.has_blocked_document("bot1")
+
+
+def test_reclassify_dry_run_nao_altera_nada(tmp_path: Path):
+    from auditframework.ingestion.service import reclassify_documents
+
+    registry = _registry_with_downloaded(tmp_path)
+    before = registry.references_path.read_text(encoding="utf-8")
+    files_before = sorted(p.name for p in registry.documents_dir.iterdir())
+
+    blocked = reclassify_documents(registry, dry_run=True)
+
+    assert [r.id for r in blocked] == ["bot1"]
+    assert registry.references_path.read_text(encoding="utf-8") == before
+    assert sorted(p.name for p in registry.documents_dir.iterdir()) == files_before

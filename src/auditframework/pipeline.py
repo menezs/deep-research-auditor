@@ -132,6 +132,37 @@ def load_run_context(run_id: str, settings: Settings) -> RunContext:
     )
 
 
+# Artefatos que dependem dos documentos indexados: uma reclassificacao de
+# barreiras os torna invalidos (foram montados com a barreira como evidencia).
+_POST_INGESTION_ARTIFACTS = (
+    "index",
+    "curated",
+    "audit_results.jsonl",
+    "skipped_chunks.jsonl",
+    "report.md",
+    "report.json",
+    "tabela_chunks_veredito.md",
+)
+
+
+def invalidate_after_ingestion(run_dir: Path) -> Path | None:
+    """Move os artefatos posteriores a ingestao para
+    `invalidado-<AAAAMMDDTHHMMSSZ>/` (nunca apaga) e recorta `state.json`
+    para extraction/ingestion, para que `audit resume` refaca indexacao,
+    julgamento e relatorio. Devolve a pasta criada, ou `None` se nao havia
+    nada a mover."""
+    existing = [run_dir / name for name in _POST_INGESTION_ARTIFACTS if (run_dir / name).exists()]
+    if not existing:
+        return None
+    backup = run_dir / f"invalidado-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}"
+    backup.mkdir()
+    for path in existing:
+        path.replace(backup / path.name)
+    kept = [stage for stage in _load_stage_state(run_dir) if stage in ("extraction", "ingestion")]
+    _save_stage_state(run_dir, kept)
+    return backup
+
+
 def _stage_state_path(run_dir: Path) -> Path:
     return run_dir / "state.json"
 

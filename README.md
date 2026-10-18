@@ -88,12 +88,36 @@ nesse caso.
 | `audit run RESPOSTA [--tool NOME]` | roda o pipeline completo |
 | `audit resume RUN_ID` | retoma do último estágio/chunk concluído |
 | `audit report RUN_ID` | reimprime o `report.md` de uma run concluída |
+| `audit reclassify RUN_ID [--dry-run]` | procura barreiras de acesso nos documentos já baixados e tira essas fontes da análise |
 | `audit compare RUN_ID [RUN_ID ...]` | compara o % de vereditos entre execuções |
 
 `--tool` (padrão `unknown`) é apenas metadado do relatório. O `run_id` é
 derivado deterministicamente do hash do conteúdo do arquivo + timestamp.
 `audit resume` pula por inteiro estágios já persistidos e, dentro do
 julgamento, pula chunk a chunk os que já têm resultado — nada é refeito.
+
+### Barreiras de acesso
+
+Status HTTP 200 não garante que o documento foi baixado: anti-bots
+("Checking your browser…"), páginas de erro servidas como conteúdo, avisos de
+"habilite o JavaScript"/login/região, intersticiais de download e páginas sem
+texto chegam como HTML válido. Depois de converter cada fonte, a ingestão
+roda `ingestion/barrier.py` (padrões conhecidos, só em documentos com menos de
+300 palavras; abaixo de 25 palavras sem padrão = sem conteúdo). Antes de
+desistir, tenta uma vez via Playwright.
+
+Fonte com barreira recebe `status: "blocked"`, com `barrier_kind` e um trecho
+como evidência em `error_message`; o texto fica em
+`documents/<id>.blocked.md`, que a indexação e a verificação não leem. A
+partir daí vale a mesma regra das fontes não baixadas: afirmação que cita só
+fontes sem conteúdo não é julgada; afirmação que cita uma fonte bloqueada
+junto com outras é julgada só com as que têm conteúdo.
+
+Runs baixadas antes dessa checagem: `audit reclassify RUN_ID --dry-run` lista
+as barreiras sem mudar nada; sem `--dry-run`, as fontes vão para quarentena e
+os artefatos de indexação/julgamento são movidos para
+`invalidado-<data>/` (nada é apagado). Depois, `audit resume RUN_ID` refaz a
+indexação, o julgamento e o relatório.
 
 ### Formatos de entrada
 
