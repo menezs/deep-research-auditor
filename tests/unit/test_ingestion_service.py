@@ -195,3 +195,74 @@ def test_dead_reference_is_not_retried_by_the_inaccessible_pass(tmp_path: Path):
     ingest_references([ref], registry, fetcher=fetcher)
 
     assert fetcher.calls["https://example.com/404"] == 1  # so a passada principal
+
+
+_BARRIER_HTML = (
+    "<html><body><p>This website uses a security service to protect against malicious bots.</p></body></html>"
+)
+
+
+def _barrier_result() -> FetchResult:
+    return FetchResult(
+        content=_BARRIER_HTML.encode("utf-8"), content_type="text/html", fetch_method="curl_cffi", http_status=200
+    )
+
+
+def test_conteudo_de_barreira_vira_referencia_bloqueada_sem_documento(tmp_path: Path):
+    ref = _reference("bot1", "https://example.com/bot")
+    registry = ReferenceRegistry(tmp_path)
+    fetcher = FakeFetcher({"https://example.com/bot": _barrier_result()})
+
+    updated, documents = ingest_references([ref], registry, fetcher=fetcher)
+
+    assert updated[0].status == ReferenceStatus.BLOCKED
+    assert updated[0].barrier_kind == "anti_bot"
+    assert "barreira de acesso (anti_bot)" in updated[0].error_message
+    assert documents == []
+    assert not registry.has_document("bot1")
+    assert registry.has_blocked_document("bot1")
+
+
+class _PlaywrightRescues(FakeFetcher):
+    def fetch_via_playwright(self, url: str) -> FetchResult:
+        self.calls[url] = self.calls.get(url, 0) + 1
+        return FetchResult(
+            content=_ARTICLE_HTML.encode("utf-8"), content_type="text/html", fetch_method="playwright", http_status=200
+        )
+
+
+def test_barreira_resolvida_pelo_playwright_vira_documento(tmp_path: Path):
+    ref = _reference("bot1", "https://example.com/bot")
+    registry = ReferenceRegistry(tmp_path)
+    fetcher = _PlaywrightRescues({"https://example.com/bot": _barrier_result()})
+
+    updated, documents = ingest_references([ref], registry, fetcher=fetcher)
+
+    assert updated[0].status == ReferenceStatus.DOWNLOADED
+    assert documents[0].fetch_method == "playwright"
+    assert registry.has_document("bot1")
+
+
+def test_retomada_nao_rebaixa_referencia_bloqueada(tmp_path: Path):
+    url = "https://example.com/bot"
+    registry = ReferenceRegistry(tmp_path)
+    fetcher = FakeFetcher({url: _barrier_result()})
+
+    ingest_references([_reference("bot1", url)], registry, fetcher=fetcher)
+    chamadas = fetcher.calls[url]
+    updated, documents = ingest_references([_reference("bot1", url)], registry, fetcher=fetcher)
+
+    assert fetcher.calls[url] == chamadas
+    assert updated[0].status == ReferenceStatus.BLOCKED
+    assert updated[0].barrier_kind == "anti_bot"
+    assert documents == []
+
+
+def test_bloqueada_nao_entra_na_retentativa_de_inacessiveis(tmp_path: Path):
+    bot_url, off_url = "https://example.com/bot", "https://example.com/off"
+    registry = ReferenceRegistry(tmp_path)
+    fetcher = FakeFetcher({bot_url: _barrier_result(), off_url: InaccessibleReferenceError("timeout transitorio")})
+
+    ingest_references([_reference("bot1", bot_url), _reference("off1", off_url)], registry, fetcher=fetcher)
+
+    assert fetcher.calls[bot_url] == 2  # fetch + tentativa via playwright, nada na 2a passada

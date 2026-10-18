@@ -11,6 +11,7 @@ from tqdm import tqdm
 from ..common.errors import DeadReferenceError, ExtractionError, InaccessibleReferenceError
 from ..logging_config import STAGE_COLORS, get_logger
 from ..models import Document, Reference, ReferenceStatus
+from .barrier import Barrier, detect_barrier
 from .converters import convert_to_markdown, is_pdf_content
 from .fetcher import FetchResult, HttpFetcher
 from .registry import ReferenceRegistry
@@ -36,7 +37,9 @@ def ingest_references(
     fetcher: Fetcher | None = None,
 ) -> tuple[list[Reference], list[Document]]:
     """Baixa e converte cada Reference para Markdown, atualizando seu
-    status (DOWNLOADED/DEAD/INACCESSIBLE/ERROR).
+    status (DOWNLOADED/DEAD/INACCESSIBLE/ERROR/BLOCKED). BLOCKED = o
+    servidor respondeu, mas o conteudo e uma barreira de acesso
+    (`ingestion.barrier`); o texto fica em `<id>.blocked.md`, fora da analise.
 
     E idempotente: referencias cujo documento ja existe no registry sao
     puladas sem nova requisicao HTTP — substitui o rastreamento fragil de
@@ -53,13 +56,23 @@ def ingest_references(
     documents: list[Document] = []
 
     already_downloaded = [ref for ref in references if registry.has_document(ref.id)]
-    pending = [ref for ref in references if not registry.has_document(ref.id)]
+    # Barreira ja detectada numa execucao anterior: nao baixa de novo (o
+    # `audit resume` refaria o mesmo download para cair na mesma tela).
+    already_blocked = [
+        ref for ref in references if not registry.has_document(ref.id) and registry.has_blocked_document(ref.id)
+    ]
+    pending = [
+        ref for ref in references if not registry.has_document(ref.id) and not registry.has_blocked_document(ref.id)
+    ]
     logger.info(
-        "Ingestao: %d referencias, %d ja baixadas, %d pendentes",
+        "Ingestao: %d referencias, %d ja baixadas, %d ja bloqueadas, %d pendentes",
         len(references),
         len(already_downloaded),
+        len(already_blocked),
         len(pending),
     )
+    for ref in already_blocked:
+        updated[ref.id] = _restore_blocked(ref, registry)
 
     for ref in already_downloaded:
         # o status de `ref` reflete o que o chamador passou (ex: PENDING,
@@ -97,9 +110,7 @@ def ingest_references(
                     None,
                 )
             updated[new_ref.id] = new_ref
-            if document is not None and markdown is not None:
-                registry.save_document(document, markdown)
-                documents.append(document)
+            _persist(registry, new_ref, document, markdown, documents)
 
     # Segunda passada, serial, so para as referencias que ficaram
     # INACCESSIBLE por um motivo possivelmente transitorio (rate-limit,
@@ -124,15 +135,52 @@ def ingest_references(
         ):
             new_ref, document, markdown = _ingest_one_bounded(ref, retry_fetcher, _REF_BUDGET_SECONDS)
             updated[new_ref.id] = new_ref
-            if document is not None and markdown is not None:
-                registry.save_document(document, markdown)
-                documents.append(document)
+            _persist(registry, new_ref, document, markdown, documents)
             if new_ref.status == ReferenceStatus.DOWNLOADED:
                 logger.info("Referencia %s recuperada na segunda tentativa", ref.raw_url)
 
     final_references = list(updated.values())
     registry.save_references(final_references)
     return final_references, documents
+
+
+def _persist(
+    registry: ReferenceRegistry,
+    reference: Reference,
+    document: Document | None,
+    markdown: str | None,
+    documents: list[Document],
+) -> None:
+    """Grava o resultado de uma ingestao: documento valido em `<id>.md`,
+    barreira de acesso em `<id>.blocked.md` (fora da analise, mas conferivel)."""
+    if document is not None and markdown is not None:
+        registry.save_document(document, markdown)
+        documents.append(document)
+    elif reference.status == ReferenceStatus.BLOCKED and markdown is not None:
+        registry.save_blocked_document(reference.id, markdown)
+
+
+def _blocked(reference: Reference, barrier: Barrier, http_status: int | None) -> Reference:
+    return reference.model_copy(
+        update={
+            "status": ReferenceStatus.BLOCKED,
+            "barrier_kind": barrier.kind,
+            "http_status": http_status,
+            "fetched_at": datetime.now(timezone.utc),
+            "error_message": f"barreira de acesso ({barrier.kind}): {barrier.evidence}",
+        }
+    )
+
+
+def _restore_blocked(reference: Reference, registry: ReferenceRegistry) -> Reference:
+    """Status de uma referencia cuja barreira ja esta gravada. Quem chama
+    pode passar a referencia recem-extraida (PENDING), entao o tipo da
+    barreira e redetectado do arquivo quando nao vier preenchido."""
+    if reference.status == ReferenceStatus.BLOCKED and reference.barrier_kind:
+        return reference
+    text = registry.blocked_document_path(reference.id).read_text(encoding="utf-8")
+    barrier = detect_barrier(text) or Barrier("no_content", " ".join(text.split())[:120])
+    return _blocked(reference, barrier, reference.http_status)
 
 
 def _worth_retrying(reference: Reference) -> bool:
@@ -176,6 +224,9 @@ def _ingest_one(
 ) -> tuple[Reference, Document | None, str | None]:
     try:
         result, markdown = _fetch_and_convert(reference, fetcher)
+        barrier = detect_barrier(markdown)
+        if barrier is not None:
+            result, markdown, barrier = _retry_barrier_with_playwright(reference, fetcher, result, markdown, barrier)
     except DeadReferenceError as exc:
         logger.warning("Referencia morta: %s", reference.raw_url)
         return _with_status(reference, ReferenceStatus.DEAD, str(exc)), None, None
@@ -188,6 +239,10 @@ def _ingest_one(
     except Exception as exc:  # defensivo: fronteira de rede/parsing de terceiros
         logger.exception("Erro inesperado ao ingerir %s", reference.raw_url)
         return _with_status(reference, ReferenceStatus.ERROR, str(exc)), None, None
+
+    if barrier is not None:
+        logger.warning("Barreira de acesso (%s) em %s", barrier.kind, reference.raw_url)
+        return _blocked(reference, barrier, result.http_status), None, markdown
 
     updated_ref = reference.model_copy(
         update={
@@ -205,6 +260,22 @@ def _ingest_one(
         word_count=len(markdown.split()),
     )
     return updated_ref, document, markdown
+
+
+def _retry_barrier_with_playwright(
+    reference: Reference, fetcher: Fetcher, result: FetchResult, markdown: str, barrier: Barrier
+) -> tuple[FetchResult, str, Barrier | None]:
+    """Uma barreira de JavaScript/anti-bot as vezes cai num navegador de
+    verdade: tenta uma vez via Playwright antes de bloquear. PDF e conteudo
+    ja vindo do Playwright nao tem o que ganhar com isso."""
+    if result.fetch_method == "playwright" or is_pdf_content(result.content_type, reference.raw_url):
+        return result, markdown, barrier
+    try:
+        retry = fetcher.fetch_via_playwright(reference.raw_url)
+        retry_markdown = convert_to_markdown(retry.content, retry.content_type, reference.raw_url)
+    except (InaccessibleReferenceError, ExtractionError):
+        return result, markdown, barrier
+    return retry, retry_markdown, detect_barrier(retry_markdown)
 
 
 def _fetch_and_convert(reference: Reference, fetcher: Fetcher) -> tuple[FetchResult, str]:
