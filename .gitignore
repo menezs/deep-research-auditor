@@ -189,3 +189,4 @@ answers/*json
 .env
 scripts/
 estudo-fontes-nao-citadas/
+docs/
