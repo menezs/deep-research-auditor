@@ -272,7 +272,7 @@ class TestRender:
         assert "## 2. Distribuição de Vereditos" in markdown
         assert "## 3. Custo e Uso de Tokens" in markdown
         assert "## 4. Análise por Referência" in markdown
-        assert "## 5. Referências Mortas e Inacessíveis" in markdown
+        assert "## 5. Referências Mortas, Inacessíveis e Bloqueadas" in markdown
         assert "## 6. Exemplos Representativos por Veredito" in markdown
         assert "HTTP 404" in markdown
 
@@ -356,7 +356,7 @@ class TestRender:
         assert "## 3. Custo e Uso de Tokens" in markdown
         assert "## 4. Análise por Referência" in markdown
         assert "## 5." not in markdown
-        assert "Referências Mortas e Inacessíveis" not in markdown
+        assert "Referências Mortas, Inacessíveis e Bloqueadas" not in markdown
         assert "Chunks Não Auditados" not in markdown
 
     def test_markdown_without_raw_results_skips_examples_section(self):
@@ -787,3 +787,35 @@ def test_pulo_por_fonte_bloqueada_tem_contagem_propria():
     )
     assert report.skipped_reason_counts == {"ref_bloqueada": 1, "ref_sem_conteudo": 1}
     assert "citam só referências bloqueadas por barreira de acesso" in render_markdown(report)
+
+
+def test_relatorio_lista_referencias_bloqueadas():
+    bloqueada = _reference("r1", status=ReferenceStatus.BLOCKED).model_copy(
+        update={"barrier_kind": "anti_bot", "error_message": "barreira de acesso (anti_bot): Checking your browser"}
+    )
+    report = aggregate_report(
+        run_id="run-1", answer_id="a1", tool_name="ChatGPT",
+        chunks=[_chunk("c1", ["r1"])], references=[bloqueada], results=[],
+    )
+    assert len(report.blocked_references) == 1
+    markdown = render_markdown(report)
+    assert "Bloqueadas por barreira de acesso" in markdown
+    assert "anti_bot" in markdown
+
+
+def test_taxas_sobre_auditadas_ignoram_afirmacoes_puladas():
+    chunks = [_chunk(f"c{i}", ["r1"]) for i in range(4)]
+    results = [
+        _result("c0", AuditVerdict.SUPPORTED),
+        _result("c1", AuditVerdict.SUPPORTED),
+        _result("c2", AuditVerdict.UNSUPPORTED),
+    ]
+    skipped = [SkippedChunk(answer_chunk_id="c3", reason="Referencia(s) citada(s) ['r1'] nao possui(em) conteudo indexado.")]
+    report = aggregate_report(
+        run_id="run-1", answer_id="a1", tool_name="ChatGPT",
+        chunks=chunks, references=[_reference("r1")], results=results, skipped=skipped,
+    )
+    assert report.count_audited == 3
+    assert report.pct_unsupported_audited == pytest.approx(100 / 3)
+    assert report.pct_unsupported == 25.0
+    assert "UNSUPPORTED 33,33%" in render_markdown(report)

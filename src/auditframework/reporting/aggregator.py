@@ -262,6 +262,7 @@ def aggregate_report(
     (percentual por referencia, referencias mortas, custo total) e escrito
     manualmente a partir do JSON bruto no audit_with_llm."""
     percentages = _verdict_percentages(results, total=len(chunks))
+    audited = _verdict_percentages(results)
     counts = _verdict_counts(results)
     verification = _verification_summary(results)
     cost = summarize_cost(results)
@@ -306,6 +307,10 @@ def aggregate_report(
         count_unsupported=counts["count_unsupported"],
         count_contradicted=counts["count_contradicted"],
         count_skipped=len(skipped),
+        count_audited=len(results),
+        pct_supported_audited=audited["pct_supported"],
+        pct_unsupported_audited=audited["pct_unsupported"],
+        pct_contradicted_audited=audited["pct_contradicted"],
         count_partially_supported=partially_supported,
         skipped_reason_counts=_skipped_reason_counts(skipped),
         uncredited_reference_count=uncredited_refs,
@@ -316,6 +321,7 @@ def aggregate_report(
         mis_cited_reference_count=verification["mis_cited_reference_count"],
         dead_references=[r for r in references if r.status == ReferenceStatus.DEAD],
         inaccessible_references=[r for r in references if r.status == ReferenceStatus.INACCESSIBLE],
+        blocked_references=[r for r in references if r.status == ReferenceStatus.BLOCKED],
         skipped_chunks=skipped,
         reference_stats=reference_stats,
         citation_issues=_citation_issues(chunks, references, results),

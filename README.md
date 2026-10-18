@@ -262,7 +262,10 @@ aplicam:
 2. **Distribuição de Vereditos** — contagem e % de
    SUPPORTED/UNSUPPORTED/CONTRADICTED (e SKIPPED, quando houver); quantos dos
    SUPPORTED são **parcialmente suportados** (têm `unsupported_aspects`); e
-   quantos trechos com afirmação factual não têm **nenhuma** citação.
+   quantos trechos com afirmação factual não têm **nenhuma** citação. Abaixo
+   da tabela, as mesmas taxas **sobre as afirmações auditadas** (sem as
+   puladas) — é essa a taxa a comparar entre ferramentas, porque a fração
+   pulada depende da coleta das fontes, não da ferramenta.
 3. **Verificação de UNSUPPORTED** — quantos `UNSUPPORTED` iniciais foram
    **confirmados**, quantos foram **reclassificados** (por etapa) e quantos são
    **provável erro de citação** (corroborados por outra referência).
@@ -290,10 +293,11 @@ aplicam:
    `#N` do trecho da resposta para o qual serve de evidência. É a "tabela de
    verificação de conteúdo" de uma auditoria manual, sem repetir a mesma
    referência.
-8. **Referências Mortas e Inacessíveis** — HTTP 404 e 403/timeout/SSL após
-   esgotar as estratégias de fetch (`curl_cffi` com fingerprint de navegador →
-   cloudscraper → playwright), com teto de tempo por referência e uma 2ª
-   tentativa só para falhas possivelmente transitórias.
+8. **Referências Mortas, Inacessíveis e Bloqueadas** — HTTP 404 e
+   403/timeout/SSL após esgotar as estratégias de fetch (`curl_cffi` com
+   fingerprint de navegador → cloudscraper → playwright), com teto de tempo por
+   referência e uma 2ª tentativa só para falhas possivelmente transitórias; e
+   as bloqueadas por barreira de acesso, com o tipo e o trecho da barreira.
 9. **Exemplos por Veredito** — até 3 por veredito, com trecho, justificativa,
    evidência literal, aspectos não cobertos, uma tabela por fonte citada e — se
    reclassificado ou corroborado por outra fonte — o que o baseline dizia +
@@ -305,7 +309,7 @@ aplicam:
 11. **Chunks Citados com Várias Afirmações** — heurística complementar: chunk
     citado com ≥3 frases em que só a última está adjacente à citação.
 12. **Chunks Não Auditados** — chunks pulados, agrupados por motivo (não citam
-    nada / citam referência não baixada).
+    nada / citam referência não baixada / citam só referências bloqueadas).
 
 Além do relatório, cada run grava `data/runs/<run_id>/tabela_chunks_veredito.md`:
 uma única tabela Markdown com **todos** os chunks na ordem da resposta —

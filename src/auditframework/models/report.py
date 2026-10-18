@@ -134,6 +134,14 @@ class Report(BaseModel):
     count_unsupported: int = 0
     count_contradicted: int = 0
     count_skipped: int = 0
+    count_audited: int = 0
+    """Afirmacoes efetivamente julgadas (sem as puladas). E o denominador de
+    `pct_*_audited` — o que se compara entre ferramentas, porque a fracao
+    pulada depende da coleta (fonte nao baixada ou bloqueada), nao da
+    ferramenta auditada."""
+    pct_supported_audited: float = 0.0
+    pct_unsupported_audited: float = 0.0
+    pct_contradicted_audited: float = 0.0
     count_partially_supported: int = 0
     """SUPPORTED com aspectos da afirmacao nao cobertos pela evidencia
     (`AuditResult.unsupported_aspects` nao vazio)."""
@@ -161,6 +169,8 @@ class Report(BaseModel):
 
     dead_references: list[Reference] = Field(default_factory=list)
     inaccessible_references: list[Reference] = Field(default_factory=list)
+    blocked_references: list[Reference] = Field(default_factory=list)
+    """Baixadas, mas o conteudo era barreira de acesso (`ReferenceStatus.BLOCKED`)."""
     skipped_chunks: list[SkippedChunk] = Field(default_factory=list)
     reference_stats: list[ReferenceStats] = Field(default_factory=list)
     citation_issues: list[CitationIssue] = Field(default_factory=list)

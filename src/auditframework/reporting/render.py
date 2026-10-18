@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from decimal import ROUND_DOWN, Decimal
 
 from ..models import AnswerChunk, AuditResult, AuditVerdict, Reference, Report, SkippedChunk, ToolStats
 
@@ -56,6 +57,13 @@ def _compress_positions(positions: list[int]) -> str:
         start = prev = n
     ranges.append(f"#{start}" if start == prev else f"#{start}–{prev}")
     return ", ".join(ranges)
+
+
+def _pct_truncado(valor: float) -> str:
+    """Percentual truncado (nunca arredondado) em 2 casas, formato pt-BR:
+    100/3 -> "33,33%"."""
+    truncado = Decimal(str(valor)).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+    return f"{truncado}".replace(".", ",") + "%"
 
 
 def _format_duration(seconds: float) -> str:
@@ -212,6 +220,13 @@ class ReportRenderer:
             total_pct += pct_skipped
         table += f"\n| **TOTAL** | {total_chunks} | {total_pct:.1f}% |"
         body = "| Veredito | Chunks | Percentual |\n|---|---|---|\n" + table
+        if report.count_audited:
+            body += (
+                f"\n\nSobre as {report.count_audited} afirmações auditadas: "
+                f"SUPPORTED {_pct_truncado(report.pct_supported_audited)}, "
+                f"UNSUPPORTED {_pct_truncado(report.pct_unsupported_audited)}, "
+                f"CONTRADICTED {_pct_truncado(report.pct_contradicted_audited)}."
+            )
         if report.count_partially_supported:
             body += (
                 f"\n\n> **{report.count_partially_supported} dos {report.count_supported} SUPPORTED são "
@@ -404,7 +419,7 @@ class ReportRenderer:
 
     def _render_dead_and_inaccessible(self) -> ReportSection | None:
         report = self.report
-        if not report.dead_references and not report.inaccessible_references:
+        if not report.dead_references and not report.inaccessible_references and not report.blocked_references:
             return None
         lines: list[str] = []
         if report.dead_references:
@@ -415,7 +430,15 @@ class ReportRenderer:
             lines.append(
                 "\n".join(f"- {r.raw_url} — {r.error_message or 'sem detalhes'}" for r in report.inaccessible_references)
             )
-        return ReportSection("Referências Mortas e Inacessíveis", "\n".join(lines))
+        if report.blocked_references:
+            lines.append("\n### Bloqueadas por barreira de acesso\n")
+            lines.append(
+                "\n".join(
+                    f"- {r.raw_url} — {r.barrier_kind or 'sem tipo'} — {r.error_message or 'sem detalhes'}"
+                    for r in report.blocked_references
+                )
+            )
+        return ReportSection("Referências Mortas, Inacessíveis e Bloqueadas", "\n".join(lines).strip())
 
     _SKIP_REASON_LABELS = {
         "citacao_sem_entrada": "citam um `[N]` que não existe na lista de referências",
