@@ -40,6 +40,7 @@ from .models import (
     AuditVerdict,
     CuratedDocument,
     JudgeConfig,
+    ReferenceStatus,
     SkippedChunk,
     SourceInfo,
 )
@@ -394,7 +395,12 @@ class JudgingStage:
         chunks = _load_answer_chunks(ctx.run_dir)
         index_dir = ctx.run_dir / "index"
         store = FaissVectorStore.load(self.embedder.dimension, index_dir / "faiss.index", index_dir / "chunks.json")
-        retriever = Retriever(self.embedder, store, self.reranker, self.top_k, self.rerank_top_k)
+        blocked = frozenset(
+            ref.id for ref in ReferenceRegistry(ctx.run_dir).load_references() if ref.status == ReferenceStatus.BLOCKED
+        )
+        retriever = Retriever(
+            self.embedder, store, self.reranker, self.top_k, self.rerank_top_k, blocked_reference_ids=blocked
+        )
         verifier = Verifier(self.llm_client)
         cascade = build_verification_cascade(
             embedder=self.embedder,

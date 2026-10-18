@@ -420,6 +420,7 @@ class ReportRenderer:
     _SKIP_REASON_LABELS = {
         "citacao_sem_entrada": "citam um `[N]` que não existe na lista de referências",
         "ref_sem_conteudo": "citam referência não baixada/inacessível",
+        "ref_bloqueada": "citam só referências bloqueadas por barreira de acesso (anti-bot, erro HTTP, login)",
         "outro": "outro motivo",
     }
 

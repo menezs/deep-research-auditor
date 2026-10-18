@@ -231,7 +231,9 @@ def _skipped_reason_counts(skipped: list[SkippedChunk]) -> dict[str, int]:
     counts: Counter[str] = Counter()
     for chunk in skipped:
         reason = chunk.reason.lower()
-        if "nao tem entrada correspondente" in reason or "não tem entrada correspondente" in reason:
+        if "bloqueada" in reason:
+            counts["ref_bloqueada"] += 1
+        elif "nao tem entrada correspondente" in reason or "não tem entrada correspondente" in reason:
             counts["citacao_sem_entrada"] += 1
         elif "conteudo indexado" in reason or "conteúdo indexado" in reason:
             counts["ref_sem_conteudo"] += 1

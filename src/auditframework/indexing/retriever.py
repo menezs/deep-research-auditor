@@ -39,18 +39,29 @@ class Retriever:
         reranker: Reranker | None = None,
         top_k: int = 50,
         rerank_top_k: int = 20,
+        blocked_reference_ids: frozenset[str] = frozenset(),
     ):
         self.embedder = embedder
         self.vector_store = vector_store
         self.reranker = reranker
         self.top_k = top_k
         self.rerank_top_k = rerank_top_k
+        # Referencias cujo conteudo baixado e barreira de acesso
+        # (`ReferenceStatus.BLOCKED`): nao estao no indice, e o motivo do pulo
+        # precisa dizer isso, nao "nao baixada".
+        self.blocked_reference_ids = blocked_reference_ids
 
     def retrieve(self, chunk: AnswerChunk) -> CuratedDocument:
         if not chunk.cited_reference_ids:
             return self._skipped(chunk, "Marcador(es) de citacao do trecho nao tem entrada correspondente na lista de referencias.")
         allowed_ids = self.vector_store.embedding_ids_for_references(chunk.cited_reference_ids)
         if not allowed_ids:
+            if set(chunk.cited_reference_ids) & self.blocked_reference_ids:
+                return self._skipped(
+                    chunk,
+                    f"Referencia(s) citada(s) {chunk.cited_reference_ids} bloqueada(s) por barreira de acesso "
+                    "(anti-bot, erro HTTP, login) — sem conteudo para auditar.",
+                )
             return self._skipped(
                 chunk,
                 f"Referencia(s) citada(s) {chunk.cited_reference_ids} nao possui(em) conteudo indexado "

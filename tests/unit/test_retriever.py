@@ -249,3 +249,35 @@ def test_merge_overlapping_ignores_trivial_common_prefix():
     assert "## Secao um" in merged
     assert "## Secao dois" in merged
     assert merged.count("Secao") == 2
+
+
+def test_afirmacao_so_com_fonte_bloqueada_e_pulada_com_motivo_proprio():
+    store = _build_store()
+    embedder = FakeEmbedder({"pergunta sobre C": [1.0, 0.0, 0.0]})
+    retriever = Retriever(
+        embedder, store, reranker=None, top_k=5, rerank_top_k=5, blocked_reference_ids=frozenset({"refC"})
+    )
+
+    chunk = AnswerChunk(id="c1", answer_id="a1", position=0, text="pergunta sobre C", cited_reference_ids=["refC"])
+    curated = retriever.retrieve(chunk)
+
+    assert "bloqueada(s) por barreira de acesso" in curated.skip_reason
+    assert "conteudo indexado" not in curated.skip_reason
+    assert curated.passages == []
+
+
+def test_afirmacao_mista_e_julgada_so_com_a_fonte_valida():
+    store = _build_store()
+    embedder = FakeEmbedder({"pergunta sobre A": [0.99, 0.01, 0.0]})
+    retriever = Retriever(
+        embedder, store, reranker=None, top_k=5, rerank_top_k=5, blocked_reference_ids=frozenset({"refC"})
+    )
+
+    chunk = AnswerChunk(
+        id="c1", answer_id="a1", position=0, text="pergunta sobre A", cited_reference_ids=["refA", "refC"]
+    )
+    curated = retriever.retrieve(chunk)
+
+    assert curated.skip_reason is None
+    assert curated.passages
+    assert all(p.reference_id == "refA" for p in curated.passages)

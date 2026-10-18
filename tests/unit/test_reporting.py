@@ -769,3 +769,21 @@ class TestChunkTableMarkdown:
         # pipe is escaped and the newline is collapsed, so the cell boundaries stay intact
         assert "a \\| b c" in row
         assert len(re.findall(r"(?<!\\)\|", row)) == 5  # 4 columns -> 5 unescaped delimiters
+
+
+def test_pulo_por_fonte_bloqueada_tem_contagem_propria():
+    chunks = [_chunk("c1", ["r1"]), _chunk("c2", ["r2"])]
+    skipped = [
+        SkippedChunk(
+            answer_chunk_id="c1",
+            reason="Referencia(s) citada(s) ['r1'] bloqueada(s) por barreira de acesso (anti-bot, erro HTTP, login) "
+            "— sem conteudo para auditar.",
+        ),
+        SkippedChunk(answer_chunk_id="c2", reason="Referencia(s) citada(s) ['r2'] nao possui(em) conteudo indexado."),
+    ]
+    report = aggregate_report(
+        run_id="run-1", answer_id="a1", tool_name="ChatGPT",
+        chunks=chunks, references=[_reference("r1"), _reference("r2")], results=[], skipped=skipped,
+    )
+    assert report.skipped_reason_counts == {"ref_bloqueada": 1, "ref_sem_conteudo": 1}
+    assert "citam só referências bloqueadas por barreira de acesso" in render_markdown(report)
